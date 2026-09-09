@@ -108,6 +108,15 @@ Primary and alias clients share one model-call budget and exact-output history, 
 cookie jars. Only primary model cookies are returned to the caller. Each rollout creates a fresh
 subclass and cache, including for children constructed with `type(self)`.
 
+Explicit non-null `responses_create_params.temperature`, `top_p`, and `max_output_tokens` values
+apply to every model call in the rollout, including aliases and children. The corresponding
+`gym eval run --temperature`, `--top-p`, and `--max-output-tokens` flags populate those row fields.
+Precedence is: explicit Gym row setting, then NOOA's per-call setting, then model-server/provider
+defaults. Omitted or null fields do not override defaults; temperature `0` is an explicit override.
+`max_output_tokens` limits each model response, not total rollout tokens. The adapter forwards only
+these three row sampling controls; NOOA still supplies model prompts, tools and structured-output
+schemas, and Gym configuration controls model routing.
+
 ## Evidence and failures
 
 Scoped public NOOA hooks supply invocation parentage and code-execution facts. Gym retains exact model

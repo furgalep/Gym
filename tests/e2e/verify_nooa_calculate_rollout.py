@@ -33,6 +33,9 @@ def main() -> None:
         captured = trajectory["model_calls"][0]
         assert captured["response_metadata"]["response_id"] == f"resp-nooa-{expected}"
         assert captured["request"] and captured["response"]
+        assert captured["request"]["temperature"] == 0
+        assert captured["request"]["top_p"] == 0.9
+        assert captured["request"]["max_output_tokens"] == 64
         assert row["ng_perf"]["token_observability_coverage"] == 1.0
         assert row["response"]["usage"]["input_tokens"] == row["ng_perf"]["prompt_tokens"]
         assert row["response"]["usage"]["output_tokens"] == row["ng_perf"]["completion_tokens"]

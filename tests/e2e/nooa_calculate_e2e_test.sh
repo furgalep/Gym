@@ -124,6 +124,7 @@ timeout --signal=INT --kill-after=30s 180 "$GYM_BIN" eval run \
   --limit 2 \
   --concurrency 1 \
   --temperature 0 \
+  --top-p 0.9 \
   --max-output-tokens 64 \
   "++observability_enabled=true" \
   "++model_call_capture_dir=$NOOA_E2E_CAPTURE_DIR" \

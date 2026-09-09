@@ -316,6 +316,50 @@ async def test_actual_alias_dispatch_and_children_share_only_their_rollouts_clie
 
 
 @pytest.mark.asyncio
+async def test_row_sampling_reaches_primary_alias_and_child_without_leaking_between_rollouts() -> None:
+    runner, _ = alias_runner()
+    settings = [
+        {"temperature": 0, "top_p": 0.8, "max_output_tokens": 64},
+        {"temperature": 0.6, "top_p": 0.95, "max_output_tokens": 256},
+        {},
+        {"temperature": None, "top_p": None, "max_output_tokens": None},
+    ]
+    for sampling in settings:
+        source = Row(
+            responses_create_params={
+                "input": "question",
+                "model": "row-must-not-route-models",
+                "instructions": "row-must-not-replace-nooa-instructions",
+                "metadata": {"expected_answer": "private"},
+                "tool_choice": "none",
+                **sampling,
+            },
+            agent_inputs={},
+        )
+        before = source.model_dump(mode="json")
+        runner._server_client.post.reset_mock()
+        result = await runner.run(NOOARunRequest(row=source, model_url_path="/v1/responses"))
+        assert result.return_value == ["primary_model", "helper_model", "helper_model"]
+        requests = runner._server_client.post.await_args_list
+        assert [call.kwargs["server_name"] for call in requests] == ["primary_model", "helper_model", "helper_model"]
+        expected = {name: value for name, value in sampling.items() if value is not None}
+        for call in requests:
+            body = call.kwargs["json"]
+            assert (
+                body.model_dump(
+                    include={"temperature", "top_p", "max_output_tokens"}, exclude_none=True, exclude_unset=True
+                )
+                == expected
+            )
+            assert body.model is None
+            assert "row-must-not-replace" not in (body.instructions or "")
+            assert body.metadata is None
+            assert body.tool_choice == "auto"
+            assert {tool["name"] for tool in body.tools} == {"execute_python", "return_result"}
+        assert source.model_dump(mode="json") == before
+
+
+@pytest.mark.asyncio
 async def test_unknown_method_alias_never_consults_nooa_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = MagicMock(side_effect=AssertionError("external registry must not be consulted"))
     monkeypatch.setattr("nooa.unifiedllm.get_llm_client", registry)
