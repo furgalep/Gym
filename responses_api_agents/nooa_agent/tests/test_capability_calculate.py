@@ -66,7 +66,7 @@ def _agent_config() -> NOOAAgentConfig:
     )
 
 
-def _policy_response(result: int | float | str) -> NeMoGymResponse:
+def _policy_response(result: int | float | str, *, code: str | None = None) -> NeMoGymResponse:
     return NeMoGymResponse(
         id=f"calculate-{result}",
         created_at=0,
@@ -76,8 +76,8 @@ def _policy_response(result: int | float | str) -> NeMoGymResponse:
             NeMoGymResponseFunctionToolCallForTraining(
                 id=f"fc-{result}",
                 call_id=f"return-{result}",
-                name="return_result",
-                arguments=json.dumps({"result": result}),
+                name="return_result" if code is None else "execute_python",
+                arguments=json.dumps({"result": result} if code is None else {"code": code}),
                 prompt_token_ids=[1, 2],
                 generation_token_ids=[3],
                 generation_log_probs=[-0.1],
@@ -90,7 +90,7 @@ def _policy_response(result: int | float | str) -> NeMoGymResponse:
 
 
 def capability_server_client(
-    *, policy_result: int | float | str
+    *, policy_result: int | float | str, policy_code: str | None = None
 ) -> tuple[ServerClient, list[tuple[str, str]], list[Any]]:
     calls: list[tuple[str, str]] = []
     policy_requests: list[Any] = []
@@ -106,7 +106,7 @@ def capability_server_client(
         calls.append((server_name, url_path))
         if server_name == "policy_model":
             policy_requests.append(json)
-            return FakeHTTPResponse(_policy_response(policy_result).model_dump(mode="json"))
+            return FakeHTTPResponse(_policy_response(policy_result, code=policy_code).model_dump(mode="json"))
         if url_path == "/seed_session":
             return FakeHTTPResponse({}, cookie=("resource_session", "seeded"))
         if url_path == "/verify":
@@ -221,6 +221,51 @@ async def test_calculate_capability_verifier_rejects_a_wrong_result() -> None:
     assert result.expected_result == 7
     assert result.actual_result == 999
     assert result.output_correct is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verifier_fails", [False, True])
+async def test_inline_return_keeps_serializable_evidence_even_on_verifier_failure(verifier_fails: bool) -> None:
+    row = _load_rows()[0]
+    client, _, policy_requests = capability_server_client(
+        policy_result=7, policy_code="answer = a + b\nprint(answer)\nreturn_result(answer)"
+    )
+    original_post = client.post
+
+    async def post(*, url_path: str, **kwargs: Any) -> FakeHTTPResponse:
+        if verifier_fails and url_path == "/verify":
+            raise ConnectionError("verifier unavailable")
+        return await original_post(url_path=url_path, **kwargs)
+
+    object.__setattr__(client, "post", post)
+    agent = NOOAAgent(config=_agent_config(), server_client=client)
+    result = await agent.run(
+        SimpleNamespace(cookies={}, path_params={}, url=SimpleNamespace(path="/run")),
+        Response(),
+        NOOAAgentRunRequest.model_validate(row),
+    )
+    persisted = json.loads(result.model_dump_json())
+    assert len(policy_requests) == 1
+    assert result.reward == (0.0 if verifier_fails else 1.0)
+    if verifier_fails:
+        assert persisted["_ng_failure_class"] == "transient"
+        assert persisted["error"] == "NOOARunFailure: verifier unavailable"
+    else:
+        assert result.actual_result == 7
+    trajectory = persisted["ng_trajectory"]
+    assert len(trajectory["turns"]) == 1
+    tool = next(tool for tool in trajectory["tool_calls"] if tool["tool_call_id"] == "return-7")
+    assert tool["status"] == "completed"
+    assert json.loads(tool["output"])["stdout"] == "7\n"
+    owner = next(inv for inv in trajectory["invocations"] if inv["invocation_id"] == tool["invocation_id"])
+    observed = next(
+        item
+        for item in owner["conversation"]
+        if item["type"] == "function_call_output" and item["call_id"] == "return-7"
+    )
+    assert tool["output"] == observed["output"]
+    answer = trajectory["turns"][0]["answer"][0]
+    assert answer["generation_token_ids"] == [3]
 
 
 @pytest.mark.asyncio
