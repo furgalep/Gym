@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
@@ -27,10 +28,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_observability import ModelCallRef
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     PolicyCallBudgetExceeded,
+    RolloutLLMState,
     _finish_reason,
     _tool_schema,
 )
@@ -79,19 +80,18 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
     ).model_dump(mode="json")
 
 
-def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, list[ModelCallRef]]:
+def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
-    collected: list[ModelCallRef] = []
+    state = RolloutLLMState(max_steps=max_steps)
     llm = GymResponsesLLM(
         server_client=server_client,
         model_server_name="policy_model",
         model_url_path="/ng-rollout/rollout-1/v1/responses",
-        max_steps=max_steps,
-        model_call_collector=collected,
+        state=state,
         cookies={},
     )
-    return llm, server_client, collected
+    return llm, server_client, state
 
 
 @pytest.mark.parametrize(
@@ -185,9 +185,11 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
     assert request["json"].max_output_tokens == 128
     assert request["json"].tools[0]["name"] == "weather"
     assert result.content == "Cold"
-    assert collected[0].response_id == "resp-1"
-    assert collected[0].model_ref is not None
-    assert collected[0].model_ref.name == "policy_model"
+    assert collected.model_calls[0].response_id == "resp-1"
+    assert collected.model_calls[0].model_ref is not None
+    assert collected.model_calls[0].model_ref.name == "policy_model"
+    assert collected.calls[0].request == request["json"]
+    assert collected.calls[0].request is not request["json"]
 
 
 @pytest.mark.asyncio
@@ -208,6 +210,13 @@ async def test_preserves_function_call_token_metadata() -> None:
     assert result.finish_reason == "tool_calls"
     assert result.tool_calls[0].name == "weather"
     assert result.assistant_message["_batch"][0]["generation_token_ids"] == [11, 12]
+
+    await llm.acall(
+        [{"role": "assistant", "tool_calls": [{"id": "call-1", "function": {"name": "weather", "arguments": "{}"}}]}]
+    )
+    assert llm._state.calls[-1].request.input[0].model_dump(mode="json", exclude_none=True) == output.model_dump(
+        mode="json", exclude_none=True
+    )
 
 
 @pytest.mark.asyncio
@@ -250,3 +259,90 @@ def test_rejects_synchronous_policy_calls() -> None:
 
     with pytest.raises(RuntimeError, match="async"):
         llm.call([])
+
+
+def text_output(identity: str, token: int) -> NeMoGymResponseOutputMessageForTraining:
+    return NeMoGymResponseOutputMessageForTraining(
+        id=identity,
+        content=[NeMoGymResponseOutputText(annotations=[], text="same")],
+        prompt_token_ids=[token],
+        generation_token_ids=[token + 1],
+        generation_log_probs=[-0.1],
+    )
+
+
+@pytest.mark.asyncio
+async def test_independent_alias_histories_never_swap_identical_text_metadata() -> None:
+    llm, client, state = make_llm(model_response(), max_steps=4)
+    client.post.side_effect = [
+        FakeHTTPResponse(model_response(text_output("alias-a", 11))),
+        FakeHTTPResponse(model_response(text_output("alias-b", 22))),
+        FakeHTTPResponse(model_response()),
+        FakeHTTPResponse(model_response()),
+    ]
+    helper = GymResponsesLLM(
+        server_client=client,
+        model_server_name="helper",
+        model_url_path="/v1/responses",
+        cookies={},
+        state=state,
+    )
+    await llm.acall([])
+    await helper.acall([])
+    await helper.acall([{"role": "assistant", "content": "same"}])
+
+    ambiguous = state.calls[-1].request.input[0].model_dump(mode="json", exclude_none=True)
+    assert "prompt_token_ids" not in ambiguous
+    assert "id" not in ambiguous
+    assert state.gaps[-1].code == "prior_output_metadata_ambiguous"
+
+    await helper.acall([{"type": "message", "id": "alias-b", "role": "assistant", "content": "same"}])
+    restored = state.calls[-1].request.input[0].model_dump(mode="json", exclude_none=True)
+    assert restored == text_output("alias-b", 22).model_dump(mode="json", exclude_none=True)
+
+
+@pytest.mark.asyncio
+async def test_unique_text_and_repeated_identified_outputs_restore_exactly() -> None:
+    output = text_output("unique", 11)
+    llm, _, state = make_llm(model_response(output))
+    await llm.acall([])
+    items = [{"role": "assistant", "content": "same"}]
+    state.restore_prior_outputs(items)
+    assert items == [output.model_dump(mode="json", exclude_none=True)]
+    repeated = [dict(items[0]), dict(items[0])]
+    state.restore_prior_outputs(repeated)
+    assert repeated == items * 2
+    assert state.gaps == []
+
+
+@pytest.mark.asyncio
+async def test_unidentified_repeated_history_is_not_assigned_one_outputs_metadata_twice() -> None:
+    llm, _, state = make_llm(model_response(text_output("unique", 11)))
+    await llm.acall([])
+    items = [{"role": "assistant", "content": "same"}, {"role": "assistant", "content": "same"}]
+    state.restore_prior_outputs(items)
+    assert all("id" not in item for item in items)
+    assert state.gaps[-1].code == "prior_output_metadata_ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_clients_share_one_budget_before_http() -> None:
+    llm, client, state = make_llm(model_response(text_output("unique", 11)), max_steps=3)
+    helper = GymResponsesLLM(
+        server_client=client,
+        model_server_name="helper",
+        model_url_path="/v1/responses",
+        cookies={},
+        state=state,
+    )
+    results = await asyncio.gather(*[(llm if i % 2 else helper).acall([]) for i in range(10)], return_exceptions=True)
+    assert sum(isinstance(result, PolicyCallBudgetExceeded) for result in results) == 7
+    assert client.post.await_count == state.used == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_model_keyword_cannot_override_gym_routing() -> None:
+    llm, client, _ = make_llm(model_response())
+    await llm.acall([], model="external-model")
+    assert client.post.await_args.kwargs["json"].model is None
+    assert client.post.await_args.kwargs["server_name"] == "policy_model"

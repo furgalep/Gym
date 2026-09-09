@@ -21,11 +21,17 @@ from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
 from nooa.atif import atif_scope
+from nooa.unifiedllm import UnifiedLLM
 
-from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
+from nemo_gym.rollout_observability import AgentEpisode
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
+from responses_api_agents.nooa_agent.gym_llm import (
+    GymResponsesLLM,
+    InvalidPolicyOutputError,
+    PolicyCallBudgetExceeded,
+    RolloutLLMState,
+)
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.observability import project_nooa_episode
 from responses_api_agents.nooa_agent.resource_tools import (
@@ -61,6 +67,20 @@ class ArgumentMappingError(ValueError):
     """Raised when a Gym row cannot supply the configured NOOA entrypoint arguments."""
 
 
+class GymModelAliases(dict[str, UnifiedLLM]):
+    """Pinned NOOA cache protocol, with no fallthrough to its external registry.
+
+    NOOA checks this per-agent cache before resolving a method-model string. A fresh
+    mapping on the per-rollout subclass also covers children built with type(self).
+    This is adapter compatibility, not an isolation boundary for arbitrary Python.
+    """
+
+    def get(self, key: str, default: Any = None) -> UnifiedLLM:
+        if key not in self:
+            raise ValueError(f"NOOA model alias {key!r} is not in configured model_aliases")
+        return self[key]
+
+
 class EmbeddedNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -81,24 +101,38 @@ class EmbeddedNOOARunner:
         self._agent_class, _ = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
-        model_calls: list[ModelCallRef] = []
+        state = RolloutLLMState(max_steps=self._max_steps)
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
-            max_steps=self._max_steps,
-            model_call_collector=model_calls,
+            state=state,
             cookies=request.model_cookies,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
             cookies=request.resource_cookies,
+            allowed_tools=frozenset(self._invocation.allowed_tools),
         )
         agent_class = create_agent_class_with_resource_methods(
             self._agent_class,
             dispatcher=dispatcher,
             tools=list(request.row.responses_create_params.tools),
+        )
+        # Seed even an empty map: unknown strings must fail before registry I/O.
+        agent_class._strategy_llm_alias_cache = GymModelAliases(
+            {
+                alias: GymResponsesLLM(
+                    server_client=self._server_client,
+                    model_server_name=server,
+                    model_url_path=request.model_url_path,
+                    state=state,
+                    cookies=dict(request.model_cookies),
+                    model=alias,
+                )
+                for alias, server in self._invocation.model_aliases.items()
+            }
         )
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
@@ -119,20 +153,17 @@ class EmbeddedNOOARunner:
                 except PolicyCallBudgetExceeded as error:
                     termination_reason = "policy_budget_exceeded"
                     termination_error = str(error)
-                except ValueError as error:
-                    message = str(error)
-                    if "Gym model returned invalid" in message:
-                        termination_reason = "invalid_policy_output"
-                        termination_error = message
-                    else:
-                        raise
+                except InvalidPolicyOutputError as error:
+                    termination_reason = "invalid_policy_output"
+                    termination_error = str(error)
             trajectory = exporter.get_trajectory()
 
         episode = project_nooa_episode(
             create_params=request.row.responses_create_params,
             trajectory=trajectory,
-            model_calls=model_calls,
+            model_calls=state.model_calls,
         )
+        episode.observations.gaps.extend(state.gaps)
         return NOOARunResult(
             episode=episode,
             return_value=return_value,

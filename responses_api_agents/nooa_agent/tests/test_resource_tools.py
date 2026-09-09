@@ -89,6 +89,7 @@ def make_agent(
         server_client=client,
         resources_server_name="weather_resources",
         cookies=cookies,
+        allowed_tools=frozenset({"get_weather"}),
     )
     agent_class = create_agent_class_with_resource_methods(
         FakeAgent,
@@ -172,6 +173,7 @@ async def test_resource_calls_are_serialized_per_rollout() -> None:
         server_client=client,
         resources_server_name="resources",
         cookies={},
+        allowed_tools=frozenset({"get_weather", "first", "second"}),
     )
     validator = Draft202012Validator({"type": "object"})
 
@@ -189,6 +191,7 @@ def test_rejects_method_name_that_collides_with_agent() -> None:
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
+        allowed_tools=frozenset({"get_weather", "first", "second"}),
     )
 
     with pytest.raises(ValueError, match="conflicting agent method"):
@@ -204,6 +207,7 @@ def test_rejects_instance_field_that_hides_resource_method() -> None:
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
+        allowed_tools=frozenset({"get_weather", "first", "second"}),
     )
     agent_class = create_agent_class_with_resource_methods(
         AgentWithInstanceCollision,
@@ -221,6 +225,7 @@ def test_method_can_be_attached_to_real_nooa_agent_instance() -> None:
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
+        allowed_tools=frozenset({"get_weather", "first", "second"}),
     )
     agent_class = create_agent_class_with_resource_methods(
         Agent,
@@ -248,7 +253,69 @@ def test_rejects_unsupported_or_colliding_tool_definitions(tools: list[dict], me
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
+        allowed_tools=frozenset({"get_weather", "first", "second"}),
     )
 
     with pytest.raises(ValueError, match=message):
         create_agent_class_with_resource_methods(FakeAgent, dispatcher=dispatcher, tools=tools)
+
+
+@pytest.mark.parametrize("name", ["not_authorized", "seed_session", "verify"])
+@pytest.mark.asyncio
+async def test_row_tool_names_cannot_authorize_resource_routes(name: str) -> None:
+    client = MagicMock()
+    client.post = AsyncMock()
+    dispatcher = ResourceToolDispatcher(
+        server_client=client,
+        resources_server_name="resources",
+        cookies={},
+        allowed_tools=frozenset({"get_weather"}),
+    )
+    with pytest.raises(ValueError, match="configured allowed_tools"):
+        create_agent_class_with_resource_methods(
+            FakeAgent, dispatcher=dispatcher, tools=[weather_tool() | {"name": name}]
+        )
+    with pytest.raises(ValueError, match="configured allowed_tools"):
+        await dispatcher.call(name=name, arguments={}, validator=Draft202012Validator({"type": "object"}))
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.parametrize("parameter", ["self", "for", "_private", "bad-name"])
+def test_rejects_unrepresentable_tool_parameter_names(parameter: str) -> None:
+    dispatcher = ResourceToolDispatcher(
+        server_client=MagicMock(),
+        resources_server_name="resources",
+        cookies={},
+        allowed_tools=frozenset({"get_weather"}),
+    )
+    tool = weather_tool() | {
+        "parameters": {
+            "type": "object",
+            "properties": {parameter: {"type": "string"}},
+            "required": [parameter],
+            "additionalProperties": False,
+        }
+    }
+    with pytest.raises(ValueError, match="invalid parameter name"):
+        create_agent_class_with_resource_methods(FakeAgent, dispatcher=dispatcher, tools=[tool])
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object"},
+        {"type": "object", "additionalProperties": True},
+        {"type": "object", "additionalProperties": False, "required": ["undeclared"]},
+    ],
+)
+def test_rejects_open_or_incomplete_tool_signatures(schema: dict) -> None:
+    dispatcher = ResourceToolDispatcher(
+        server_client=MagicMock(),
+        resources_server_name="resources",
+        cookies={},
+        allowed_tools=frozenset({"get_weather"}),
+    )
+    with pytest.raises(ValueError, match="closed object|without properties"):
+        create_agent_class_with_resource_methods(
+            FakeAgent, dispatcher=dispatcher, tools=[weather_tool() | {"parameters": schema}]
+        )

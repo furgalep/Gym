@@ -19,12 +19,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from nooa import Agent
+from nooa import Agent, strategy
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import ArgumentMappingError, EmbeddedNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 
 
 class ValidAgent(Agent):
@@ -33,6 +34,30 @@ class ValidAgent(Agent):
         self.label = label
 
     async def analyze(self, text: str, customer_id: str) -> str: ...
+
+
+class AliasedAgent(Agent):
+    async def analyze(self, text: str) -> list[str]:
+        primary = await self.primary(text)
+        helper = await self.helper(text)
+        child = type(self)(llm=self._llm)
+        return [primary, helper, await child.helper(text)]
+
+    async def primary(self, text: str) -> str:
+        """Answer the question."""
+        ...
+
+    @strategy(llm="helper")
+    async def helper(self, text: str) -> str:
+        """Answer the question."""
+        ...
+
+
+class UnknownAliasAgent(Agent):
+    @strategy(llm="not-configured")
+    async def analyze(self, text: str) -> str:
+        """Answer the question."""
+        ...
 
 
 class FakeAgent:
@@ -79,6 +104,7 @@ def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
             "agent_class": f"{__name__}:ValidAgent",
             "entrypoint": "analyze",
             "init_kwargs": {"label": "configured"},
+            "allowed_tools": ["get_weather"],
             "arguments": {
                 "text": {
                     "source": "responses_create_params.input",
@@ -144,6 +170,15 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
 
 
 @pytest.mark.asyncio
+async def test_row_cannot_widen_configured_tools() -> None:
+    runner, client = make_runner()
+    runner._invocation.allowed_tools = []
+    with pytest.raises(ValueError, match="configured allowed_tools"):
+        await runner.run(NOOARunRequest(row=row("Paris"), model_url_path="/v1/responses"))
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_embedded_runner_classifies_argument_mapping_errors() -> None:
     runner, _ = make_runner()
     incomplete_row = row("Paris").model_copy(update={"agent_inputs": {}})
@@ -180,3 +215,77 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     assert FakeAgent.instances == 2
     assert first.episode is not second.episode
     assert first.resource_cookies is not second.resource_cookies
+
+
+def alias_runner(agent_class: type[Agent] = AliasedAgent) -> tuple[EmbeddedNOOARunner, list[tuple[str, dict]]]:
+    calls: list[tuple[str, dict]] = []
+
+    async def post(*, server_name: str, cookies: dict, **kwargs: Any) -> FakeHTTPResponse:
+        calls.append((server_name, dict(cookies)))
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"fc-{len(calls)}",
+            call_id=f"call-{len(calls)}",
+            name="return_result",
+            arguments=json.dumps({"result": server_name}),
+        )
+        jar = SimpleCookie()
+        jar["session"] = server_name
+        return FakeHTTPResponse(model_response(output, response_id=f"response-{len(calls)}"), jar)
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+    invocation = NOOAInvocationConfig(
+        agent_class=f"{__name__}:{agent_class.__name__}",
+        entrypoint="analyze",
+        arguments={"text": {"source": "responses_create_params.input", "transform": "latest_user_text"}},
+        model_aliases={"helper": "helper_model"},
+    )
+    return EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=client,
+        model_server_name="primary_model",
+        resources_server_name="resources",
+        max_steps=3,
+    ), calls
+
+
+@pytest.mark.asyncio
+async def test_actual_alias_dispatch_and_children_share_only_their_rollouts_clients() -> None:
+    runner, calls = alias_runner()
+    for _ in range(2):
+        result = await runner.run(
+            NOOARunRequest(
+                row=Row(responses_create_params={"input": "question"}, agent_inputs={}),
+                model_url_path="/v1/responses",
+                model_cookies={"session": "inbound"},
+            )
+        )
+        assert result.return_value == ["primary_model", "helper_model", "helper_model"]
+        assert result.model_cookies == {"session": "primary_model"}
+        assert result.termination_reason is None
+    assert (
+        calls
+        == [
+            ("primary_model", {"session": "inbound"}),
+            ("helper_model", {"session": "inbound"}),
+            ("helper_model", {"session": "helper_model"}),
+        ]
+        * 2
+    )
+    assert not hasattr(AliasedAgent, "_strategy_llm_alias_cache")
+
+
+@pytest.mark.asyncio
+async def test_unknown_method_alias_never_consults_nooa_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = MagicMock(side_effect=AssertionError("external registry must not be consulted"))
+    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", registry)
+    runner, calls = alias_runner(UnknownAliasAgent)
+    with pytest.raises(ValueError, match="not in configured model_aliases"):
+        await runner.run(
+            NOOARunRequest(
+                row=Row(responses_create_params={"input": "question"}, agent_inputs={}),
+                model_url_path="/v1/responses",
+            )
+        )
+    registry.assert_not_called()
+    assert calls == []

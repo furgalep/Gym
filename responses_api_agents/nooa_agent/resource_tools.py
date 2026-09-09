@@ -18,11 +18,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import keyword
 from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
+from nemo_gym.base_resources_server import RESERVED_MCP_TOOL_NAMES
 from nemo_gym.server_utils import ServerClient
 
 
@@ -56,11 +58,17 @@ class ResourceToolDispatcher:
         server_client: ServerClient,
         resources_server_name: str,
         cookies: dict[str, str],
+        allowed_tools: frozenset[str],
     ) -> None:
         self._server_client = server_client
         self._resources_server_name = resources_server_name
         self._cookies = cookies
+        self._allowed_tools = allowed_tools
         self._lock = asyncio.Lock()
+
+    def validate_tool_name(self, name: str) -> None:
+        if name in RESERVED_MCP_TOOL_NAMES or name not in self._allowed_tools:
+            raise ValueError(f"resource tool {name!r} is not in configured allowed_tools")
 
     async def call(
         self,
@@ -69,6 +77,7 @@ class ResourceToolDispatcher:
         arguments: dict[str, Any],
         validator: Draft202012Validator,
     ) -> Any:
+        self.validate_tool_name(name)
         async with self._lock:
             return await self._call(name=name, arguments=arguments, validator=validator)
 
@@ -118,7 +127,12 @@ def _make_method(
     explicit_defaults: dict[str, Any] = {}
     for parameter_name in ordered_names:
         parameter_schema = properties[parameter_name]
-        if not parameter_name.isidentifier() or parameter_name.startswith("_"):
+        if (
+            not parameter_name.isidentifier()
+            or keyword.iskeyword(parameter_name)
+            or parameter_name.startswith("_")
+            or parameter_name == "self"
+        ):
             raise ValueError(f"resource tool {name!r} has invalid parameter name {parameter_name!r}")
         if parameter_name in required:
             default = inspect.Parameter.empty
@@ -168,19 +182,25 @@ def create_agent_class_with_resource_methods(
         if tool.get("type") != "function":
             raise ValueError(f"resource methods support function tools only, received {tool.get('type')!r}")
         name = tool.get("name")
-        if not isinstance(name, str) or not name.isidentifier() or name.startswith("_"):
+        if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name) or name.startswith("_"):
             raise ValueError(f"resource tool name must be a public Python identifier, received {name!r}")
+        dispatcher.validate_tool_name(name)
         if name in seen or hasattr(agent_class, name):
             raise ValueError(f"duplicate or conflicting agent method name {name!r}")
         seen.add(name)
 
-        schema = tool.get("parameters") or {"type": "object", "properties": {}}
+        schema = tool.get("parameters") or {"type": "object", "properties": {}, "additionalProperties": False}
         try:
             Draft202012Validator.check_schema(schema)
         except Exception as error:
             raise ValueError(f"resource tool {name!r} has an invalid JSON Schema: {error}") from error
-        if schema.get("type") != "object":
-            raise ValueError(f"resource tool {name!r} parameters must use an object JSON Schema")
+        if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+            raise ValueError(f"resource tool {name!r} parameters must use a closed object JSON Schema")
+        unknown_required = set(schema.get("required", [])) - set(schema.get("properties", {}))
+        if unknown_required:
+            raise ValueError(
+                f"resource tool {name!r} has required parameters without properties: {sorted(unknown_required)}"
+            )
 
         method = _make_method(
             agent_class=agent_class,
