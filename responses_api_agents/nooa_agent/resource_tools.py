@@ -19,13 +19,19 @@ import asyncio
 import inspect
 import json
 import keyword
-from typing import Any
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import RESERVED_MCP_TOOL_NAMES
 from nemo_gym.server_utils import ServerClient
+
+
+if TYPE_CHECKING:
+    from nemo_gym.rollout_observability import TrajectoryToolCall
+    from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 
 def _as_tool_dict(tool: Any) -> dict[str, Any]:
@@ -59,12 +65,14 @@ class ResourceToolDispatcher:
         resources_server_name: str,
         cookies: dict[str, str],
         allowed_tools: frozenset[str],
+        trace_hooks: GymTraceHooks | None = None,
     ) -> None:
         self._server_client = server_client
         self._resources_server_name = resources_server_name
         self._cookies = cookies
         self._allowed_tools = allowed_tools
         self._lock = asyncio.Lock()
+        self._trace_hooks = trace_hooks
 
     def validate_tool_name(self, name: str) -> None:
         if name in RESERVED_MCP_TOOL_NAMES or name not in self._allowed_tools:
@@ -78,8 +86,13 @@ class ResourceToolDispatcher:
         validator: Draft202012Validator,
     ) -> Any:
         self.validate_tool_name(name)
-        async with self._lock:
-            return await self._call(name=name, arguments=arguments, validator=validator)
+        scope = self._trace_hooks.resource_call(name, arguments) if self._trace_hooks else nullcontext()
+        with scope as observation:
+            async with self._lock:
+                output = await self._call(name=name, arguments=arguments, validator=validator, observation=observation)
+            if observation is not None:
+                observation.output = output
+            return output
 
     async def _call(
         self,
@@ -87,11 +100,15 @@ class ResourceToolDispatcher:
         name: str,
         arguments: dict[str, Any],
         validator: Draft202012Validator,
+        observation: TrajectoryToolCall | None = None,
     ) -> Any:
         try:
             validator.validate(arguments)
         except ValidationError as error:
             output: Any = {"error": f"Invalid arguments for {name}: {error.message}"}
+            if observation is not None:
+                observation.status = "failed"
+                observation.error_type = "invalid_arguments"
         else:
             response = await self._server_client.post(
                 server_name=self._resources_server_name,
@@ -100,6 +117,9 @@ class ResourceToolDispatcher:
                 cookies=self._cookies,
             )
             self._cookies.update({key: morsel.value for key, morsel in response.cookies.items()})
+            if observation is not None and response.status >= 400:
+                observation.status = "failed"
+                observation.error_type = f"http_{response.status}"
             body = (await response.content.read()).decode(errors="replace")
             try:
                 output = json.loads(body)
