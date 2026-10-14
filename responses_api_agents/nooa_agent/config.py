@@ -55,6 +55,14 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int | None = Field(
         default=None, gt=0, description="Known policy context window used by NOOA's context planner."
     )
+    retain_task_services_until_close: bool = Field(
+        default=False,
+        description=(
+            "Sandboxed mode only: after a successful worker exit, keep its detached task services alive until "
+            "the agent session closes (after verification). Failures, timeouts and cancellation still clean up "
+            "immediately."
+        ),
+    )
 
     @field_validator("num_workers")
     @classmethod

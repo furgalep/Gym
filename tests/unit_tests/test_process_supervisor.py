@@ -272,3 +272,113 @@ finally:
     assert summary["error"] == "launch handle lost after process creation"
     assert summary["cleanup_confirmed"] is True
     assert summary["child_alive"] is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
+@pytest.mark.parametrize("ending", ["normal", "crash", "timeout", "cancel"])
+def test_deferred_cleanup_retains_services_only_on_success(tmp_path: Path, ending: str) -> None:
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        "pathlib.Path('service.tmp').write_text(str(child.pid))\n"
+        "pathlib.Path('service.tmp').replace('service.pid')\n"
+        "if sys.argv[1] == 'crash': raise SystemExit(7)\n"
+        "if sys.argv[1] in ('timeout', 'cancel'): time.sleep(60)\n"
+    )
+    completion, stop, cleanup = (tmp_path / name for name in ("completion.json", "stop", "cleanup.json"))
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            str(SUPERVISOR),
+            "--timeout",
+            "0.8" if ending == "timeout" else "10",
+            "--cleanup-timeout",
+            "0.2",
+            "--stop-file",
+            str(stop),
+            "--completion-receipt",
+            str(completion),
+            "--receipt",
+            str(cleanup),
+            "--",
+            sys.executable,
+            str(worker),
+            ending,
+        ],
+        cwd=tmp_path,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "service.pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service = int((tmp_path / "service.pid").read_text())
+        if ending == "cancel":
+            process.send_signal(signal.SIGTERM)
+        while not completion.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert completion.exists()
+        outcome = json.loads(completion.read_text())
+        if ending == "normal":
+            assert outcome == {"return_code": 0, "timed_out": False, "stopping": False}
+            time.sleep(0.3)
+            assert process.poll() is None
+            assert not cleanup.exists()
+            os.kill(service, 0)  # Verification can still reach a live detached service.
+            stop.touch()
+        else:
+            assert outcome["return_code"] != 0 or outcome["timed_out"] or outcome["stopping"]
+        process.wait(timeout=5)
+        assert json.loads(cleanup.read_text())["cleanup_confirmed"] is True
+        with pytest.raises(ProcessLookupError):
+            os.kill(service, 0)
+    finally:
+        stop.touch()
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
+def test_deferred_cleanup_stops_on_sigterm(tmp_path: Path) -> None:
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        "pathlib.Path('service.pid').write_text(str(child.pid))\n"
+    )
+    completion, stop, cleanup = (tmp_path / name for name in ("completion.json", "stop", "cleanup.json"))
+    process = subprocess.Popen(
+        [sys.executable, "-I", str(SUPERVISOR), "--timeout", "10", "--cleanup-timeout", "0.2"]
+        + ["--stop-file", str(stop), "--completion-receipt", str(completion), "--receipt", str(cleanup)]
+        + ["--", sys.executable, str(worker)],
+        cwd=tmp_path,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not completion.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service = int((tmp_path / "service.pid").read_text())
+        os.kill(service, 0)
+        process.send_signal(signal.SIGTERM)  # Session close signals runner.pid as well as touching the stop file.
+        process.wait(timeout=5)
+        assert json.loads(cleanup.read_text())["cleanup_confirmed"] is True
+        with pytest.raises(ProcessLookupError):
+            os.kill(service, 0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_completion_receipt_requires_stop_file(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", str(SUPERVISOR), "--timeout", "1", "--receipt", str(tmp_path / "cleanup.json")]
+        + ["--completion-receipt", str(tmp_path / "completion.json"), "--", sys.executable, "-c", "pass"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert "--completion-receipt requires --stop-file" in result.stderr

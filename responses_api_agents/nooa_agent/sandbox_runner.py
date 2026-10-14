@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Borrow a task sandbox and supervise one whole NOOA activation."""
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -29,6 +30,8 @@ class SandboxNOOARunner:
         model_server_name: str,
         max_policy_calls: int | None,
         context_window: int | None = None,
+        retain_task_services: bool = False,
+        poll_interval_s: float = 2.0,
     ) -> None:
         self.sandbox = sandbox
         self.workdir = workdir
@@ -38,6 +41,8 @@ class SandboxNOOARunner:
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
         self.context_window = context_window
+        self.retain_task_services = retain_task_services
+        self.poll_interval_s = poll_interval_s
         self.directory = f"/tmp/nemo-gym-nooa/{uuid4().hex}"
         self.launched = False
         self.stopped = False
@@ -70,6 +75,8 @@ class SandboxNOOARunner:
             path = Path(directory) / "input.json"
             path.write_text(payload.model_dump_json())
             await self.sandbox.upload(path, f"{self.directory}/input.json")
+        if self.retain_task_services:
+            return await self._run_retaining_services(request)
         d, python = quote(self.directory), quote(self.python)
         # The atomic claim also fences an exec whose response is lost or delayed until after close.
         command = (
@@ -82,6 +89,57 @@ class SandboxNOOARunner:
         await self.sandbox.exec(command, cwd=self.workdir, timeout_s=None)
         await self.stop()
         await self.collect()
+        return self._finish(request)
+
+    async def _run_retaining_services(self, request: NOOARunRequest) -> NOOARunResult:
+        """Launch the supervisor in the background and return while it keeps services alive.
+
+        The supervisor publishes ``completion.json`` when the worker exits. After a
+        successful exit it keeps its subreaper (and the agent's detached services)
+        alive until ``stop()`` from session close, which the environment issues after
+        verification. Any failure, missing evidence or cancellation stops at once.
+        """
+        d, python = quote(self.directory), quote(self.python)
+        # Same atomic claim as the blocking path; ``runner.exit`` also reports a launcher crash.
+        command = (
+            f"(trap '' TERM; ln -s launch {d}/launch.claim 2>/dev/null || exit 0; "
+            f"{python} -I -m responses_api_agents.nooa_agent.sandbox_supervisor {d} --retain-services "
+            f">{d}/stdout.log 2>{d}/stderr.log; echo $? > {d}/runner.exit) </dev/null >/dev/null 2>&1 &"
+        )
+        self.launched = True
+        launch = await self.sandbox.exec(command, cwd=self.workdir, timeout_s=30, preserve_background_services=True)
+        if launch.return_code != 0:
+            await self.stop()
+            raise RuntimeError("Could not launch NOOA supervisor")
+        # Episode cancellation comes from nooa_single_agent_turn; no second episode clock.
+        while True:
+            status = await self.sandbox.exec(
+                f"test -f {d}/completion.json || test -f {d}/cleanup.json || test -f {d}/runner.exit",
+                cwd="/",
+                timeout_s=30,
+            )
+            if status.return_code == 0:
+                break
+            await asyncio.sleep(self.poll_interval_s)
+        await self.collect()
+        try:
+            completion = json.loads(await self._read("completion.json"))
+        except Exception:
+            completion = None
+        if self.artifact is None or completion is None or self.artifact.error is not None:
+            await self.stop()
+            return self._finish(request)
+        if (
+            completion.get("return_code") != 0
+            or completion.get("timed_out") is not False
+            or completion.get("stopping")
+        ):
+            await self.stop()
+            raise RuntimeError(f"NOOA worker did not complete successfully: {completion}")
+        # Success: the services stay up for verification; close() stops and reaps them.
+        return self._finish(request)
+
+    def _finish(self, request: NOOARunRequest) -> NOOARunResult:
         if self.artifact is None:
             raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
         request.model_cookies.update(self.artifact.model_cookies)

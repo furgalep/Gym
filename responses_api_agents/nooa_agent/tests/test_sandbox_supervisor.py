@@ -42,3 +42,17 @@ def test_nooa_launcher_uses_main_reaper_without_a_second_deadline(
     assert json.loads((tmp_path / "cleanup.json").read_text()) == receipt
     assert not (tmp_path / "cleanup.tmp").exists()
     assert not (tmp_path / "completion.json").exists()
+
+
+def test_nooa_launcher_retain_mode_publishes_completion_and_keeps_stop_fence(monkeypatch, tmp_path: Path) -> None:
+    receipt = {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
+    reaper = MagicMock(return_value=receipt)
+    monkeypatch.setattr(sandbox_supervisor.process_supervisor, "_supervise", reaper)
+    assert sandbox_supervisor.supervise(tmp_path, retain_services=True) == 0
+    assert reaper.call_args.kwargs == {
+        "timeout": math.inf,
+        "cleanup_timeout": 5,
+        "stop_path": tmp_path / "runner.stop",
+        "completion_path": tmp_path / "completion.json",
+    }
+    assert json.loads((tmp_path / "cleanup.json").read_text()) == receipt

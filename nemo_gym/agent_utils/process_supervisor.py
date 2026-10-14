@@ -70,8 +70,17 @@ def _supervise(
     timeout: float,
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
+    completion_path: Path | None = None,
 ) -> CleanupReceipt:
-    """Enforce a harness deadline, then acknowledge cleanup after all descendants exit."""
+    """Enforce a harness deadline, then acknowledge cleanup after all descendants exit.
+
+    With ``completion_path``, the harness outcome is published there first. After a
+    successful, uncancelled, in-deadline exit the subreaper then stays alive, keeping
+    detached task services running and owned, until ``stop_path`` appears or SIGTERM
+    arrives. Timeouts, failures and cancellation are never deferred.
+    """
+    if completion_path is not None and stop_path is None:
+        raise ValueError("Deferred cleanup requires a durable stop file")
     process = None
     subreaping = False
     stopping = False
@@ -110,6 +119,16 @@ def _supervise(
                 process.wait(timeout=cleanup_timeout)
             except subprocess.TimeoutExpired:
                 pass
+        if completion_path is not None:
+            completion = {"return_code": process.poll(), "timed_out": receipt["timed_out"], "stopping": stopping}
+            temporary = completion_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(completion))
+            temporary.replace(completion_path)
+            # Keep the subreaper alive so detached services stay owned until episode teardown.
+            if process.poll() == 0 and not receipt["timed_out"] and not stopping:
+                assert stop_path is not None
+                while not stopping and not stop_path.exists():
+                    time.sleep(0.05)
     except Exception as exc:
         receipt["error"] = str(exc)
     finally:
@@ -144,12 +163,23 @@ def main() -> int:
     parser.add_argument("--cleanup-timeout", type=_positive_seconds, default=DEFAULT_CLEANUP_TIMEOUT)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument(
+        "--completion-receipt", type=Path, help="Publish the harness outcome; keep services after success until stop"
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a harness command is required after --")
-    receipt = _supervise(command, timeout=args.timeout, cleanup_timeout=args.cleanup_timeout, stop_path=args.stop_file)
+    if args.completion_receipt is not None and args.stop_file is None:
+        parser.error("--completion-receipt requires --stop-file")
+    receipt = _supervise(
+        command,
+        timeout=args.timeout,
+        cleanup_timeout=args.cleanup_timeout,
+        stop_path=args.stop_file,
+        completion_path=args.completion_receipt,
+    )
     temporary = args.receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps(receipt))
     temporary.replace(args.receipt)

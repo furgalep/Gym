@@ -125,6 +125,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
+                retain_task_services=self.config.retain_task_services_until_close,
             )
             state.runner = runner
             try:
