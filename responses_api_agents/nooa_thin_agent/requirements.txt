@@ -1,9 +1,12 @@
 -e nemo-gym[dev,sandbox] @ ../../
 jsonschema>=4.25.1,<5
-# NOOA and its Gym harness module (nooa_bench.gym). Pin all packages to one commit.
-nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@dev/atom
-nooa-cli @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@dev/atom#subdirectory=packages/nooa-cli
-nooa-bench @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@dev/atom#subdirectory=packages/nooa-bench
-nooa-atom @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@dev/atom#subdirectory=packages/nooa-atom
-# litellm's Responses path imports MCP v2 types; Gym core only needs v1 for mcp_auto_exposure.
+# NOOA and its Gym harness module (nooa_bench.gym), pinned to one source commit.
+# Spike pin: labs-OO-Agents PR #480 (feat/atom-jobs-reland) + the thin-harness commit.
+nooa @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz
+nooa-cli @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz#subdirectory=packages/nooa-cli
+nooa-bench @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz#subdirectory=packages/nooa-bench
+nooa-atom @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz#subdirectory=packages/nooa-atom
+# mcp>=2.2 (see overrides.txt) imports cryptography but does not always pull it in under an override.
+cryptography>=43
+# The override in overrides.txt lifts nemo-gym's mcp<2 pin for this venv.
 mcp>=2.2.0,<3

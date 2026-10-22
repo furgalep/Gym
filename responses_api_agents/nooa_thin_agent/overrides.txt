@@ -1,0 +1,2 @@
+# nemo-gym pins mcp<2 for mcp_auto_exposure; litellm's Responses path (used by NOOA) imports MCP v2 types.
+mcp>=2.2.0,<3
