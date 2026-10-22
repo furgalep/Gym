@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import platform
 import shlex
 import shutil
 import subprocess
@@ -81,13 +82,39 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
                 specs.append(requirement)
         specs.extend(str(wheel) for wheel in sorted(wheels.glob("*.whl")))
         # Install into the interpreter's own site-packages: no venv, nothing to relocate but the tree.
-        subprocess.run(
-            [uv, "pip", "install", "--quiet", "--python", str(python), "--break-system-packages", *specs],
-            check=True,
-        )
+        native = platform.machine() == arch
+        if native:
+            install = [uv, "pip", "install", "--quiet", "--python", str(python), "--break-system-packages", *specs]
+        else:
+            # Cross-build (for example x86_64 pods from an aarch64 controller): resolve wheels for the
+            # target platform without running its interpreter. Everything must ship as a wheel.
+            site = next((build / "python" / "lib").glob("python3.*")) / "site-packages"
+            install = [
+                uv,
+                "pip",
+                "install",
+                "--quiet",
+                "--target",
+                str(site),
+                "--only-binary",
+                ":all:",
+                "--python-version",
+                PYTHON_VERSION,
+                "--python-platform",
+                f"{arch}-unknown-linux-gnu",
+                *specs,
+            ]
+        subprocess.run(install, check=True)
         for marker in (build / "python").rglob("_editable_impl_*.pth"):
             raise RuntimeError(f"editable install leaked into the runtime: {marker.name}")
-        subprocess.run([str(python), "-I", "-c", HEALTH_CHECK], check=True)
+        if native:
+            subprocess.run([str(python), "-I", "-c", HEALTH_CHECK], check=True)
+        else:
+            # Can't execute the target interpreter here; the sandbox-side import check in
+            # stage_runtime() is the health check for cross-built tarballs.
+            for package in ("nooa", "nooa_bench", "litellm", "httpx"):
+                if not (site / package).is_dir():
+                    raise RuntimeError(f"cross-build is missing package directory {package!r}")
         output.parent.mkdir(parents=True, exist_ok=True)
         with tarfile.open(output, "w:gz") as tar:
             tar.add(build / "python", arcname="python")
