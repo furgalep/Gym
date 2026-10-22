@@ -70,6 +70,10 @@ class NOOAThinAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     agent: str = "nooa_bench.gym:ShellAgent"
+    # Extra constructor arguments for the agent class (for AtomHarness: turn_method).
+    agent_kwargs: dict[str, Any] = Field(default_factory=dict)
+    # Policy context window, handed to NOOA for its context budgeting; None leaves NOOA's default.
+    context_window: int | None = Field(default=None, gt=0)
     execution_mode: Literal["embedded", "sandboxed"] = "sandboxed"
     # Interpreter inside the sandbox that has NOOA installed. None uses this
     # server's own interpreter, which is only meaningful with a local sandbox.
@@ -268,12 +272,15 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             else []
         )
         episode = await run_gym_episode(
-            lambda llm: agent_cls(llm=llm, run_command=run_command, extra_tools=extra_tools, workdir=workdir),
+            lambda llm: agent_cls(
+                llm=llm, run_command=run_command, extra_tools=extra_tools, workdir=workdir, **self.config.agent_kwargs
+            ),
             lambda agent: agent.solve(task),
             model_url=model_url,
             max_policy_calls=self.config.max_policy_calls,
             cookies=state.model_cookies,
             resource_cookies=resource_cookies,
+            context_window=self.config.context_window,
         )
         episode.runtime = {"python": sys.executable, "version": sys.version.split()[0]}
         return episode
@@ -295,6 +302,8 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             payload = {
                 "task": task,
                 "agent": self.config.agent,
+                "agent_kwargs": self.config.agent_kwargs,
+                "context_window": self.config.context_window,
                 "model_url": model_url,
                 "max_policy_calls": self.config.max_policy_calls,
                 "shell_timeout_seconds": self.config.shell_timeout_seconds,

@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SWE-bench Pro on the thin NOOA agent running Atom inside the task sandbox.
+# Same shape as hermes.yaml: resources server + agent + single_agent_turn_legacy environment.
+# Supply the policy model (vllm_model with sampling_overrides) and `model_call_capture_dir`
+# from the run's own config; interpolate `${nooa_runtime_tarball}` to the x86_64 runtime
+# built by `python -m responses_api_agents.nooa_thin_agent.runtime build --arch x86_64 ...`.
+
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/nooa_thin_agent/configs/nooa_thin_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+swebench_pro_nooa_thin_resources_server:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [nooa_thin_agent]
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 1
+      sandbox_config:
+        # Longer than the slowest task: the worker ceiling is 21,420 s plus verification.
+        ttl_s: 28800
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 61440
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 4
+            memory_mib: 61440
+            disk_gib: 30
+        metadata:
+          benchmark: swebench-pro
+
+swebench_pro_nooa_thin_agent:
+  _inherit_from: nooa_thin_agent
+  responses_api_agents:
+    nooa_thin_agent:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_nooa_thin_resources_server
+      agent: nooa_atom.gym:AtomHarness
+      agent_kwargs:
+        turn_method: handle_batch
+      execution_mode: sandboxed
+      runtime_tarball: ${nooa_runtime_tarball}
+      context_window: 1048576
+      # Worker ceiling; the environment's episode timeout (default 21,600 s) bounds seed + agent + verify + close.
+      timeout: 21420
+      close_timeout: 30
+      max_policy_calls: null
+
+swebench_pro_nooa_thin:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_nooa_thin_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_nooa_thin_agent
