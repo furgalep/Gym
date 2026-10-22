@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+nooa_thin_agent:
+  responses_api_agents:
+    nooa_thin_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # NOOA agent to run: module:Class with (llm, run_command) constructor args.
+      agent: nooa_bench.gym:ShellAgent
+      # embedded: NOOA runs in this server and shells into the sandbox.
+      # sandboxed: NOOA runs inside the sandbox as `python -m nooa_bench.gym_worker`.
+      execution_mode: sandboxed
+      runtime_python: null
+      timeout: 900
+      close_timeout: 30
+      max_policy_calls: null
+      shell_timeout_seconds: 180
