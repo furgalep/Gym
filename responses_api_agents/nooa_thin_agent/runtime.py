@@ -17,7 +17,9 @@ upload, ``tar -x``, and one import check, cached per tarball digest.
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
+import logging
 import platform
 import shlex
 import shutil
@@ -29,6 +31,8 @@ from pathlib import Path
 
 from nemo_gym.sandbox import AsyncSandbox
 
+
+LOG = logging.getLogger(__name__)
 
 # Same artifacts the mini-SWE adapter pins (uv 0.10.12's manifest). NOOA requires >=3.12.
 # Keyed by target triple: task images are glibc (Debian/Ubuntu) or musl (Alpine), and a
@@ -61,7 +65,8 @@ def python_url(target: str) -> str:
 
 
 def host_target() -> str:
-    libc = "musl" if platform.libc_ver()[0] not in ("glibc", "") else "gnu"
+    # platform.libc_ver() reports '' on musl hosts, so look for the loader as the sandbox probe does.
+    libc = "musl" if glob.glob("/lib/ld-musl-*.so.1") else "gnu"
     return f"{platform.machine()}-unknown-linux-{libc}"
 
 
@@ -105,7 +110,17 @@ def build_runtime(output: Path, *, target: str, requirements: list[str], cache: 
         native = host_target() == target
         config = ["--config-file", str(UV_CONFIG)]
         if native:
-            install = [uv, "pip", "install", *config, "--quiet", "--python", str(python), "--break-system-packages", *specs]
+            install = [
+                uv,
+                "pip",
+                "install",
+                *config,
+                "--quiet",
+                "--python",
+                str(python),
+                "--break-system-packages",
+                *specs,
+            ]
         else:
             # Cross-build (for example x86_64 pods from an aarch64 controller): resolve wheels for the
             # target platform without running its interpreter. Everything must ship as a wheel.
@@ -152,9 +167,7 @@ async def probe_libc(sandbox: AsyncSandbox) -> tuple[str, str]:
     return lines[0], lines[1]
 
 
-async def stage_runtime(
-    sandbox: AsyncSandbox, tarball: str | Path, *, musl_tarball: str | Path | None = None
-) -> str:
+async def stage_runtime(sandbox: AsyncSandbox, tarball: str | Path, *, musl_tarball: str | Path | None = None) -> str:
     """Make the runtime available in ``sandbox`` and return its interpreter path.
 
     ``tarball`` is the glibc build; ``musl_tarball`` serves Alpine-style images, which cannot
@@ -197,20 +210,35 @@ async def stage_runtime(
     diagnostics = (
         "echo '--- diagnostics' >&2; "
         f"(uname -m; {LIBC_PROBE}) 2>&1 | tr '\\n' ' ' >&2; echo >&2; "
-        "echo \"PATH=$PATH\" >&2; command -v sh bash tar gzip mv mkdir rm >&2 2>&1; "
+        'echo "PATH=$PATH" >&2; command -v sh bash tar gzip mv mkdir rm >&2 2>&1; '
         f"ls -la {shlex.quote(python)} {shlex.quote(target + '/python/bin')} >&2 2>&1 | head -5; "
         f"(ldd {shlex.quote(python)} || true) 2>&1 | head -5 >&2; "
         "(df -k /tmp; mount | grep -w /tmp) 2>&1 | tail -3 >&2"
     )
-    script = SANE_PATH + " " + " ".join(
-        f"echo '+ {name}' >&2; {command} || {{ rc=$?; echo \"step {name} failed (exit $rc)\" >&2; {diagnostics}; exit $rc; }};"
-        for name, command in steps
+    script = (
+        SANE_PATH
+        + " "
+        + " ".join(
+            f"echo '+ {name}' >&2; {command} || {{ rc=$?; echo \"step {name} failed (exit $rc)\" >&2; {diagnostics}; exit $rc; }};"
+            for name, command in steps
+        )
     )
     result = await sandbox.exec(script, cwd="/", timeout_s=600)
     if result.return_code != 0 or result.error_type:
         detail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-4000:]
         raise RuntimeError(f"NOOA runtime staging failed (exit {result.return_code}): {detail}")
     return python
+
+
+async def discard_runtime(sandbox: AsyncSandbox, root: str) -> None:
+    """Remove a staged runtime tree (``REMOTE_ROOT/<digest>``) so the sandbox goes on without it."""
+    if not root.startswith(REMOTE_ROOT + "/"):
+        raise ValueError(f"refusing to remove {root!r}: not under {REMOTE_ROOT}")
+    result = await sandbox.exec(
+        f"{SANE_PATH} rm -rf {shlex.quote(root)} {shlex.quote(root + '.tmp')}", cwd="/", timeout_s=120
+    )
+    if result.return_code != 0 or result.error_type:
+        LOG.warning("could not remove the staged NOOA runtime at %s: %s", root, result.stderr or result.error_type)
 
 
 def main() -> None:

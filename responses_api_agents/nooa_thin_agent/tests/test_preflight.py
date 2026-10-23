@@ -31,7 +31,11 @@ def _call(name: str, **arguments) -> dict:
 
 
 def _message(text: str) -> dict:
-    return {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]}
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
 
 
 SHELL_SCRIPT = [[_call("shell", command="echo hi")], [_message("DONE")]]
@@ -64,7 +68,9 @@ def _policy_app(bodies: list[dict], script: list[list[dict]]) -> FastAPI:
         bodies.append(await request.json())
         state["n"] += 1
         if state["n"] > len(script):
-            return JSONResponse({"error": {"message": "script exhausted", "type": "test", "code": "409"}}, status_code=409)
+            return JSONResponse(
+                {"error": {"message": "script exhausted", "type": "test", "code": "409"}}, status_code=409
+            )
         output = []
         for index, item in enumerate(script[state["n"] - 1]):
             item = {"id": f"item_{state['n']}_{index}", "status": "completed", **item}

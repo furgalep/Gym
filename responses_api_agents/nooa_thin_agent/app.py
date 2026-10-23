@@ -20,12 +20,13 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 import shlex
 import sys
 from dataclasses import dataclass, field
 from time import time
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
@@ -37,9 +38,11 @@ from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
@@ -63,7 +66,10 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.utils import read_text, upload_text
 from nemo_gym.tool_access import DirectHTTPToolAccess
-from responses_api_agents.nooa_thin_agent.runtime import stage_runtime
+from responses_api_agents.nooa_thin_agent.runtime import discard_runtime, stage_runtime
+
+
+LOG = logging.getLogger(__name__)
 
 
 class NOOAThinAgentConfig(BaseResponsesAPIAgentConfig):
@@ -101,24 +107,55 @@ class NOOAThinSession(AgentSessionState):
     workdir: str = "/app"
     tool_access: DirectHTTPToolAccess | None = None
     runtime_python: str | None = None
+    # Staged runtime tree in the sandbox, removed at close so verification does not inherit it.
+    runtime_root: str | None = None
     model_cookies: dict[str, str] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    closing: bool = False
+    # The request that owns the single activation; a retry must carry the same one.
+    activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
     execution: asyncio.Task[NeMoGymResponse] | None = None
     episode: GymEpisode | None = None
     failure: str | None = None
 
 
+def _text(content: Any, role: str) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for part in content or []:
+        part = part if isinstance(part, dict) else part.model_dump()
+        if part.get("type") not in {"input_text", "output_text", "text"}:
+            raise HTTPException(422, f"NOOA accepts text content only; {role} message carries {part.get('type')!r}")
+        parts.append(part.get("text", ""))
+    return "\n".join(parts)
+
+
 def _task_text(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
-    if isinstance(body.input, str):
-        return body.input
-    for item in reversed(body.input):
-        data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
-        if data.get("role") == "user":
-            content = data.get("content")
-            if isinstance(content, str):
-                return content
-            return "\n".join(p.get("text", "") for p in content or [] if isinstance(p, dict))
-    raise HTTPException(422, "NOOA task input must contain a user message")
+    """One task string from the request: instructions, system/developer preamble, then the user turn(s).
+
+    NOOA's ``solve`` takes a single prompt, so nothing is dropped silently: the preamble is prepended
+    in order and any item NOOA cannot represent (assistant history, tool items) is a 422.
+    """
+    items = [{"type": "message", "role": "user", "content": body.input}] if isinstance(body.input, str) else body.input
+    sections: list[str] = [body.instructions] if body.instructions else []
+    users: list[str] = []
+    for index, item in enumerate(items):
+        data = item if isinstance(item, dict) else item.model_dump()
+        kind, role = data.get("type", "message"), data.get("role")
+        if kind != "message":
+            raise HTTPException(422, f"NOOA expects message items, but input[{index}] is {kind!r}")
+        if role in {"system", "developer"}:
+            if users:
+                raise HTTPException(422, f"NOOA expects {role} messages before the first user message")
+            sections.append(_text(data.get("content"), role))
+        elif role == "user":
+            users.append(_text(data.get("content"), role))
+        else:
+            raise HTTPException(422, f"NOOA cannot replay {role!r} messages; input[{index}] is unsupported")
+    if not users:
+        raise HTTPException(422, "NOOA task input must contain a user message")
+    return "\n\n".join(section for section in [*sections, *users] if section)
 
 
 def _zero_usage() -> NeMoGymResponseUsage:
@@ -133,6 +170,8 @@ def _zero_usage() -> NeMoGymResponseUsage:
 
 class NOOAThinAgent(SimpleResponsesAPIAgent):
     config: NOOAThinAgentConfig
+    # In sandboxed mode the worker inside the task container calls the model server itself.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     async def run(self, body: object) -> None:
         raise NotImplementedError("Use the single_agent_turn Environment Server")
@@ -150,17 +189,32 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "NOOA requires direct SandboxAccess")
             workdir, provider_ref = body.sandbox_access.workdir, body.sandbox_access.connection.provider_config_ref
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
-        if owns:
-            sandbox = AsyncSandbox(provider)
-            await sandbox.start(spec)
-            await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
-        else:
-            sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+        # Everything that can be refused without a sandbox is refused first: nothing to clean up.
         accesses = self.effective_tool_accesses(body)
         direct = [a for a in accesses if isinstance(a, DirectHTTPToolAccess)]
         if any(a.required for a in accesses if not isinstance(a, DirectHTTPToolAccess)) or len(direct) > 1:
             raise HTTPException(422, "NOOA supports at most one direct HTTP tool grant")
+        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        if self.config.execution_mode == "sandboxed":
+            # The worker in the container dials the model server: a loopback URL would make every
+            # call fail inside a remote sandbox and the episode score 0 without a visible error.
+            try:
+                assert_model_url_reachable_from_sandbox(
+                    self.resolve_model_base_url(self.config.model_server.name),
+                    provider_name=next(iter(provider_config), None),
+                )
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
+        provider = create_provider(provider_config)
+        try:
+            if owns:
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
+            else:
+                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
         state = NOOAThinSession(
             request=body,
             sandbox=sandbox,
@@ -168,36 +222,60 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             workdir=workdir,
             tool_access=direct[0] if direct else None,
         )
-        if self.config.execution_mode == "sandboxed":
-            if self.config.runtime_tarball:
-                state.runtime_python = await stage_runtime(
-                    sandbox, self.config.runtime_tarball, musl_tarball=self.config.runtime_tarball_musl
-                )
-            state.session = SandboxSession(
-                sandbox=sandbox,
-                session_dir=f"/tmp/nemo-gym-nooa/{uuid4().hex}",
-                workdir=workdir,
-                harness="NOOA",
-                owns_sandbox=owns,
-            )
-            await sandbox.exec(f"mkdir -p -- {shlex.quote(state.session.session_dir)}", cwd="/", timeout_s=30)
+        try:
+            await self._prepare(state)
+        except BaseException as error:
+            # The container is up; release it. If that fails too, hand the state to the base
+            # server so its close path retries the release instead of leaking the sandbox.
+            try:
+                await self._release(state)
+            except BaseException:
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
         return state
+
+    async def _prepare(self, state: NOOAThinSession) -> None:
+        """Stage the runtime and the session directory in a sandbox that is already running."""
+        sandbox = state.sandbox
+        assert sandbox is not None
+        if state.owns_sandbox:
+            await sandbox.exec(f"mkdir -p -- {shlex.quote(state.workdir)}", cwd="/", timeout_s=30)
+        if self.config.execution_mode != "sandboxed":
+            return
+        if self.config.runtime_tarball:
+            state.runtime_python = await stage_runtime(
+                sandbox, self.config.runtime_tarball, musl_tarball=self.config.runtime_tarball_musl
+            )
+            state.runtime_root = state.runtime_python.removesuffix("/python/bin/python3")
+        state.session = SandboxSession(
+            sandbox=sandbox,
+            session_dir=f"/tmp/nemo-gym-nooa/{uuid4().hex}",
+            workdir=state.workdir,
+            harness="NOOA",
+            owns_sandbox=state.owns_sandbox,
+        )
+        await sandbox.exec(f"mkdir -p -- {shlex.quote(state.session.session_dir)}", cwd="/", timeout_s=30)
+
+    async def _release(self, state: NOOAThinSession) -> None:
+        """Stop the harness if one ran, then stop an owned sandbox or disconnect a borrowed one."""
+        if state.execution is not None and not state.execution.done():
+            state.execution.cancel()
+            await asyncio.gather(state.execution, return_exceptions=True)
+        if state.session is not None:
+            if not state.owns_sandbox and state.runtime_root and not state.session.sandbox_stopped:
+                # A borrowed sandbox goes on to verification; it should not inherit NOOA's interpreter.
+                await discard_runtime(state.sandbox, state.runtime_root)
+            await state.session.close(timeout=self.config.close_timeout)
+            if state.episode is None and isinstance(state.session.artifacts, GymEpisode):
+                state.episode = state.session.artifacts
+        elif state.sandbox is not None:
+            await (state.sandbox.stop() if state.owns_sandbox else state.sandbox.disconnect())
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         assert isinstance(state, NOOAThinSession)
-        if state.session is not None:
-            await state.session.close(timeout=self.config.close_timeout)
-            if state.execution is not None and not state.execution.done():
-                state.execution.cancel()
-                await asyncio.gather(state.execution, return_exceptions=True)
-            if state.episode is None and isinstance(state.session.artifacts, GymEpisode):
-                state.episode = state.session.artifacts
-        else:
-            if state.execution is not None and not state.execution.done():
-                state.execution.cancel()
-                await asyncio.gather(state.execution, return_exceptions=True)
-            if state.sandbox is not None:
-                await (state.sandbox.stop() if state.owns_sandbox else state.sandbox.disconnect())
+        async with state.lock:
+            state.closing = True
+        await self._release(state)
         cookies = None
         if state.tool_access is not None:
             cookies = (
@@ -207,7 +285,8 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id,
             agent_observations=self._evidence(state),
             resources_cookies=cookies,
-            cleanup_confirmed=True,
+            # Embedded mode tracks no harness process, so it reports nothing rather than a guess.
+            cleanup_confirmed=state.session.cleanup_confirmed if state.session is not None else None,
         )
 
     # -- activation -------------------------------------------------------------------------------
@@ -224,10 +303,17 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Agent session does not match the rollout route")
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "Resource tools require a direct HTTP grant")
+        task = _task_text(body)  # a request NOOA cannot run is a terminal 422, never a cached activation
         route = self.url_path_for_request("/v1/responses", request)
         async with state.lock:
+            if state.closing:
+                raise HTTPException(409, "Agent session is closing")
+            key = (body.model_copy(deep=True), route)
+            if state.activation_key is not None and state.activation_key != key:
+                raise HTTPException(409, "Session already has another activation")
             if state.execution is None:
-                state.execution = asyncio.create_task(self._execute(state, body, route))
+                state.activation_key = key
+                state.execution = asyncio.create_task(self._execute(state, task, body, route))
             execution = state.execution
         return await asyncio.shield(execution)
 
@@ -236,9 +322,8 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
         return base + route.removesuffix("/responses")
 
     async def _execute(
-        self, state: NOOAThinSession, body: NeMoGymResponseCreateParamsNonStreaming, route: str
+        self, state: NOOAThinSession, task: str, body: NeMoGymResponseCreateParamsNonStreaming, route: str
     ) -> NeMoGymResponse:
-        task = _task_text(body)
         budget = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         try:
             if state.session is not None:
@@ -246,9 +331,12 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             else:
                 async with asyncio.timeout(budget):
                     state.episode = await self._run_embedded(state, task, self._model_url(route), body)
-        except TimeoutError:
+        except TimeoutError as error:
             state.failure = "timeout_exceeded"
-            raise HTTPException(504, "NOOA agent exceeded its time budget")
+            raise HTTPException(504, f"NOOA agent exceeded its time budget: {error}") from error
+        except Exception as error:
+            state.failure = f"{type(error).__name__}: {error}"
+            raise
         return self._response(state.episode, body, state.request.episode_id.capture_key)
 
     async def _run_embedded(
@@ -328,7 +416,15 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             return SandboxCommand(argv=[python, "-I", "-m", "nooa_bench.gym_worker", inputs, result], python=python)
 
         async def collect() -> GymEpisode:
-            return GymEpisode.from_json(await read_text(state.sandbox, path=result))
+            # Runs after the supervisor confirmed termination, so its receipt is final here. A timed-out
+            # worker never writes result.json, and the supervisor exits 0 with timed_out in the receipt.
+            try:
+                return GymEpisode.from_json(await read_text(state.sandbox, path=result))
+            except Exception as error:
+                log = (await session.read_output_log())[-4000:]
+                if session.cleanup and session.cleanup["timed_out"]:
+                    raise TimeoutError(f"NOOA worker was stopped at its {budget:.0f}s budget; tail: {log}") from error
+                raise RuntimeError(f"NOOA worker exited without a result; output log tail: {log}") from error
 
         return await session.execute(
             stage_activation=stage, collect=collect, timeout=budget, close_timeout=self.config.close_timeout
