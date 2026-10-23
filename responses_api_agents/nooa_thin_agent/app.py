@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-import logging
 import os
 import shlex
 import sys
@@ -66,10 +65,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.utils import read_text, upload_text
 from nemo_gym.tool_access import DirectHTTPToolAccess
-from responses_api_agents.nooa_thin_agent.runtime import discard_runtime, stage_runtime
-
-
-LOG = logging.getLogger(__name__)
+from responses_api_agents.nooa_thin_agent.runtime import stage_runtime
 
 
 class NOOAThinAgentConfig(BaseResponsesAPIAgentConfig):
@@ -107,8 +103,6 @@ class NOOAThinSession(AgentSessionState):
     workdir: str = "/app"
     tool_access: DirectHTTPToolAccess | None = None
     runtime_python: str | None = None
-    # Staged runtime tree in the sandbox, removed at close so verification does not inherit it.
-    runtime_root: str | None = None
     model_cookies: dict[str, str] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closing: bool = False
@@ -125,7 +119,7 @@ def _text(content: Any, role: str) -> str:
     parts = []
     for part in content or []:
         part = part if isinstance(part, dict) else part.model_dump()
-        if part.get("type") not in {"input_text", "output_text", "text"}:
+        if part.get("type") != "input_text":
             raise HTTPException(422, f"NOOA accepts text content only; {role} message carries {part.get('type')!r}")
         parts.append(part.get("text", ""))
     return "\n".join(parts)
@@ -246,7 +240,6 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             state.runtime_python = await stage_runtime(
                 sandbox, self.config.runtime_tarball, musl_tarball=self.config.runtime_tarball_musl
             )
-            state.runtime_root = state.runtime_python.removesuffix("/python/bin/python3")
         state.session = SandboxSession(
             sandbox=sandbox,
             session_dir=f"/tmp/nemo-gym-nooa/{uuid4().hex}",
@@ -262,9 +255,6 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             state.execution.cancel()
             await asyncio.gather(state.execution, return_exceptions=True)
         if state.session is not None:
-            if not state.owns_sandbox and state.runtime_root and not state.session.sandbox_stopped:
-                # A borrowed sandbox goes on to verification; it should not inherit NOOA's interpreter.
-                await discard_runtime(state.sandbox, state.runtime_root)
             await state.session.close(timeout=self.config.close_timeout)
             if state.episode is None and isinstance(state.session.artifacts, GymEpisode):
                 state.episode = state.session.artifacts
@@ -416,13 +406,12 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             return SandboxCommand(argv=[python, "-I", "-m", "nooa_bench.gym_worker", inputs, result], python=python)
 
         async def collect() -> GymEpisode:
-            # Runs after the supervisor confirmed termination, so its receipt is final here. A timed-out
-            # worker never writes result.json, and the supervisor exits 0 with timed_out in the receipt.
+            # A worker stopped at its budget never writes result.json; the supervisor's receipt says so.
             try:
                 return GymEpisode.from_json(await read_text(state.sandbox, path=result))
             except Exception as error:
                 log = (await session.read_output_log())[-4000:]
-                if session.cleanup and session.cleanup["timed_out"]:
+                if session.cleanup["timed_out"]:
                     raise TimeoutError(f"NOOA worker was stopped at its {budget:.0f}s budget; tail: {log}") from error
                 raise RuntimeError(f"NOOA worker exited without a result; output log tail: {log}") from error
 

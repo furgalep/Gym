@@ -262,9 +262,6 @@ def seeding(monkeypatch, tmp_path):
         async def connect(cls, descriptor, *, provider):
             return sandbox
 
-    class _Owned(_FakeAsyncSandbox):
-        """start() returns the shared fake so the seed sees one sandbox either way."""
-
     monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {provider.name: {}})
     monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(app_module, "create_provider", lambda cfg: provider)
@@ -316,7 +313,7 @@ def test_seed_refuses_a_loopback_model_url_before_touching_the_sandbox(seeding):
     assert sandbox.commands == [] and not sandbox.disconnected
 
 
-def test_seed_stages_the_runtime_and_records_its_root(seeding):
+def test_seed_stages_the_runtime_and_opens_a_session(seeding):
     agent, provider, sandbox, _, monkeypatch = seeding
 
     async def staged(*args, **kwargs):
@@ -324,7 +321,7 @@ def test_seed_stages_the_runtime_and_records_its_root(seeding):
 
     monkeypatch.setattr(app_module, "stage_runtime", staged)
     state = asyncio.run(agent._seed_agent_session_state(_seed_request()))
-    assert state.runtime_root == "/tmp/nemo-gym-nooa-runtime/abcd"
+    assert state.runtime_python == "/tmp/nemo-gym-nooa-runtime/abcd/python/bin/python3"
     assert state.session is not None and state.session.session_dir.startswith("/tmp/nemo-gym-nooa/")
 
 
@@ -333,12 +330,16 @@ def test_seed_stages_the_runtime_and_records_its_root(seeding):
 
 @dataclass
 class _Session:
-    """Stands in for SandboxSession: runs stage then collect, exposes the supervisor's receipt."""
+    """Stands in for SandboxSession: runs stage then collect and exposes the supervisor's receipt.
+
+    It propagates collect()'s exception directly. The real session records it as capture_error and
+    re-raises it from execute() (the supervisor exits 0 on a timed-out worker), so these tests cover
+    how collect() classifies a missing result, not SandboxSession's propagation.
+    """
 
     sandbox: object
     session_dir: str = "/tmp/nemo-gym-nooa/x"
     timed_out: bool = False
-    sandbox_stopped: bool = False
     cleanup_confirmed: bool = True
     artifacts: object = None
     closed: bool = False
@@ -394,19 +395,11 @@ def test_a_crashed_worker_surfaces_its_log_and_is_recorded_as_the_failure(worker
     assert _agent()._evidence(state).gaps[0].detail == state.failure
 
 
-def test_close_reports_the_supervisors_confirmation_and_discards_the_runtime(monkeypatch):
-    discarded = []
-
-    async def discard_runtime(sandbox, root):
-        discarded.append(root)
-
-    monkeypatch.setattr(app_module, "discard_runtime", discard_runtime)
+def test_close_reports_the_supervisors_confirmation():
     session = _Session(_Sandbox(), cleanup_confirmed=False)
     state = _sandboxed_state(session)
-    state.runtime_root = "/tmp/nemo-gym-nooa-runtime/abcd"
     response = asyncio.run(_agent()._close_agent_session_state(state))
     assert response.cleanup_confirmed is False and session.closed and state.closing
-    assert discarded == ["/tmp/nemo-gym-nooa-runtime/abcd"]
 
 
 def test_embedded_close_reports_no_confirmation():

@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
-import logging
 import platform
 import shlex
 import shutil
@@ -31,8 +30,6 @@ from pathlib import Path
 
 from nemo_gym.sandbox import AsyncSandbox
 
-
-LOG = logging.getLogger(__name__)
 
 # Same artifacts the mini-SWE adapter pins (uv 0.10.12's manifest). NOOA requires >=3.12.
 # Keyed by target triple: task images are glibc (Debian/Ubuntu) or musl (Alpine), and a
@@ -228,17 +225,6 @@ async def stage_runtime(sandbox: AsyncSandbox, tarball: str | Path, *, musl_tarb
         detail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-4000:]
         raise RuntimeError(f"NOOA runtime staging failed (exit {result.return_code}): {detail}")
     return python
-
-
-async def discard_runtime(sandbox: AsyncSandbox, root: str) -> None:
-    """Remove a staged runtime tree (``REMOTE_ROOT/<digest>``) so the sandbox goes on without it."""
-    if not root.startswith(REMOTE_ROOT + "/"):
-        raise ValueError(f"refusing to remove {root!r}: not under {REMOTE_ROOT}")
-    result = await sandbox.exec(
-        f"{SANE_PATH} rm -rf {shlex.quote(root)} {shlex.quote(root + '.tmp')}", cwd="/", timeout_s=120
-    )
-    if result.return_code != 0 or result.error_type:
-        LOG.warning("could not remove the staged NOOA runtime at %s: %s", root, result.stderr or result.error_type)
 
 
 def main() -> None:

@@ -136,14 +136,6 @@ def test_probe_failure_is_reported_before_any_upload(tmp_path):
     assert sandbox.uploads == []
 
 
-def test_discard_runtime_only_removes_staged_trees(tmp_path):
-    sandbox = _Sandbox("x86_64", "gnu")
-    asyncio.run(runtime.discard_runtime(sandbox, f"{runtime.REMOTE_ROOT}/abc123"))
-    assert sandbox.commands[-1].endswith(f"rm -rf {runtime.REMOTE_ROOT}/abc123 {runtime.REMOTE_ROOT}/abc123.tmp")
-    with pytest.raises(ValueError, match="refusing"):
-        asyncio.run(runtime.discard_runtime(sandbox, "/tmp"))
-
-
 def test_build_targets_are_pinned():
     assert set(runtime.PYTHON_SHA256) >= {
         "x86_64-unknown-linux-gnu",
