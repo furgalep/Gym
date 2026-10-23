@@ -189,7 +189,9 @@ async def stage_runtime(
         ("mkdir", f"mkdir -p {tmp}"),
         ("extract", f"tar -xzf {shlex.quote(staged)} -C {tmp}"),
         ("discard-archive", f"rm -f {shlex.quote(staged)}"),
-        ("rename", f"mv -T {tmp} {shlex.quote(target)}"),
+        # No `mv -T`: busybox (Alpine images) lacks it. The target is absent or a failed earlier
+        # staging; removing it first makes a plain mv a rename either way.
+        ("rename", f"rm -rf {shlex.quote(target)} && mv {tmp} {shlex.quote(target)}"),
         ("health-check", check),
     ]
     diagnostics = (
