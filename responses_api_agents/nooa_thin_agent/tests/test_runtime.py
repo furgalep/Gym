@@ -30,7 +30,7 @@ class _Sandbox:
 
     async def exec(self, command: str, *, cwd: str | None = None, timeout_s: float | None = None):
         self.commands.append(command)
-        if command == runtime.LIBC_PROBE:
+        if command.endswith(runtime.LIBC_PROBE):
             return _Result(0, stdout=self.probe)
         return _Result(0)
 
@@ -64,7 +64,14 @@ def test_musl_image_without_a_musl_runtime_fails_before_upload(tmp_path):
     sandbox = _Sandbox("x86_64", "musl")
     with pytest.raises(RuntimeError, match="musl"):
         asyncio.run(runtime.stage_runtime(sandbox, gnu))
-    assert sandbox.commands == [runtime.LIBC_PROBE]
+    assert len(sandbox.commands) == 1 and sandbox.commands[0].endswith(runtime.LIBC_PROBE)
+
+
+def test_staging_commands_put_system_dirs_first_on_path(tmp_path):
+    gnu, _ = _tarballs(tmp_path)
+    sandbox = _Sandbox("x86_64", "gnu")
+    asyncio.run(runtime.stage_runtime(sandbox, gnu))
+    assert all(command.startswith(runtime.SANE_PATH) for command in sandbox.commands), sandbox.commands
 
 
 def test_build_targets_are_pinned():

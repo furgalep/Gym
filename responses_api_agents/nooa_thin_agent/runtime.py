@@ -41,6 +41,9 @@ PYTHON_SHA256 = {
     "x86_64-unknown-linux-musl": "3c9db1ed094d6d08e474600b7a4eab7cab655b60f7f74c3a41f1d995eb53611a",  # pragma: allowlist secret
 }
 REMOTE_ROOT = "/tmp/nemo-gym-nooa-runtime"
+# Task images may ship a PATH without the system bin dirs (every command is then "not found",
+# exit 127); staging and the health check run with the standard directories in front.
+SANE_PATH = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH};"
 # One shell line, as nemo_gym.agent_utils.uv_bootstrap probes it: machine, then C library.
 LIBC_PROBE = "uname -m && if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
 # cryptography is excluded by Gym's root resolver policy; the import proves the build used uv.toml.
@@ -142,7 +145,7 @@ def build_runtime(output: Path, *, target: str, requirements: list[str], cache: 
 
 async def probe_libc(sandbox: AsyncSandbox) -> tuple[str, str]:
     """``(machine, libc)`` of the sandbox image, libc being ``gnu`` or ``musl``."""
-    result = await sandbox.exec(LIBC_PROBE, cwd="/", timeout_s=30)
+    result = await sandbox.exec(f"{SANE_PATH} {LIBC_PROBE}", cwd="/", timeout_s=30)
     lines = (result.stdout or "").split()
     if result.return_code != 0 or len(lines) < 2:
         raise RuntimeError(f"could not probe the sandbox platform (exit {result.return_code}): {result.stderr or ''}")
@@ -172,11 +175,11 @@ async def stage_runtime(
     target = f"{REMOTE_ROOT}/{digest[:16]}"
     python = f"{target}/python/bin/python3"
     check = f"test -x {shlex.quote(python)} && {shlex.quote(python)} -I -c {shlex.quote(HEALTH_CHECK)}"
-    healthy = await sandbox.exec(check, cwd="/", timeout_s=60)
+    healthy = await sandbox.exec(f"{SANE_PATH} {check}", cwd="/", timeout_s=60)
     if healthy.return_code == 0 and not healthy.error_type:
         return python
     staged = f"{target}.tar.gz"
-    await sandbox.exec(f"mkdir -p {shlex.quote(REMOTE_ROOT)}", cwd="/", timeout_s=30)
+    await sandbox.exec(f"{SANE_PATH} mkdir -p {shlex.quote(REMOTE_ROOT)}", cwd="/", timeout_s=30)
     await sandbox.upload(tarball, staged)
     tmp = shlex.quote(target + ".tmp")
     # Each step is named on stderr, so a bare exit code (127: command or loader not found) says
@@ -197,7 +200,7 @@ async def stage_runtime(
         f"(ldd {shlex.quote(python)} || true) 2>&1 | head -5 >&2; "
         "(df -k /tmp; mount | grep -w /tmp) 2>&1 | tail -3 >&2"
     )
-    script = " ".join(
+    script = SANE_PATH + " " + " ".join(
         f"echo '+ {name}' >&2; {command} || {{ rc=$?; echo \"step {name} failed (exit $rc)\" >&2; {diagnostics}; exit $rc; }};"
         for name, command in steps
     )
