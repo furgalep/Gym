@@ -6,7 +6,7 @@ nooa @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431d
 nooa-cli @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz#subdirectory=packages/nooa-cli
 nooa-bench @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz#subdirectory=packages/nooa-bench
 nooa-atom @ https://github.com/furgalep/labs-OO-Agents/archive/b4857eb898958b8437431de2668aac0609b25889.tar.gz#subdirectory=packages/nooa-atom
-# mcp>=2.2 (see overrides.txt) imports cryptography but does not always pull it in under an override.
+# cryptography is excluded by nemo-gym; overrides.txt re-enables it (uv>=0.11.24 propagates the exclusion).
 cryptography>=43
 # The override in overrides.txt lifts nemo-gym's mcp<2 pin for this venv.
 mcp>=2.2.0,<3
