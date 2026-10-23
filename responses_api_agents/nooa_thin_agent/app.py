@@ -76,6 +76,9 @@ class NOOAThinAgentConfig(BaseResponsesAPIAgentConfig):
     agent_kwargs: dict[str, Any] = Field(default_factory=dict)
     # Policy context window, handed to NOOA for its context budgeting; None leaves NOOA's default.
     context_window: int | None = Field(default=None, gt=0)
+    # Replay prior reasoning items (summary text) to the policy. Off matches the thick nooa_agent,
+    # which never replays them; on, Gym's chat-backed servers render them as <think> text.
+    replay_reasoning: bool = False
     execution_mode: Literal["embedded", "sandboxed"] = "sandboxed"
     # Interpreter inside the sandbox that has NOOA installed. None uses this
     # server's own interpreter, which is only meaningful with a local sandbox.
@@ -365,6 +368,7 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             cookies=state.model_cookies,
             resource_cookies=resource_cookies,
             context_window=self.config.context_window,
+            replay_reasoning=self.config.replay_reasoning,
         )
         episode.runtime = {"python": sys.executable, "version": sys.version.split()[0]}
         return episode
@@ -388,6 +392,7 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
                 "agent": self.config.agent,
                 "agent_kwargs": self.config.agent_kwargs,
                 "context_window": self.config.context_window,
+                "replay_reasoning": self.config.replay_reasoning,
                 "model_url": model_url,
                 "max_policy_calls": self.config.max_policy_calls,
                 "shell_timeout_seconds": self.config.shell_timeout_seconds,

@@ -168,9 +168,11 @@ def test_atom_requests_downconvert_to_chat_completions(tmp_path, monkeypatch):
         )
     )
     converted = _downconvert_all(bodies)
-    # Atom's second request replays a reasoning item and two python_cell rounds.
+    # Atom's second request replays two python_cell rounds. The policy's reasoning item is not
+    # replayed (run_gym_episode default), matching the thick nooa_agent; the strict downconversion
+    # below is what a chat-backed vllm_model applies to the shape that does go out.
     types = [item.get("type") or item.get("role") for item in bodies[1]["input"]]
-    assert "reasoning" in types and types.count("function_call") >= 2, types
+    assert "reasoning" not in types and types.count("function_call") >= 2, types
     assert "tool" in _roles(converted[1]) and "assistant" in _roles(converted[1])
     assert (workdir / "hello.txt").read_text() == "hello gym"
     # Every executed cell is a tool record; the finishing one is also recorded as return_result.
