@@ -81,6 +81,10 @@ class NOOAThinAgentConfig(BaseResponsesAPIAgentConfig):
     # Prebuilt relocatable NOOA runtime (see runtime.py). Staged into the sandbox at seed time
     # when set; it then supplies ``runtime_python`` for the session.
     runtime_tarball: str | None = Field(default_factory=lambda: os.environ.get("NOOA_GYM_RUNTIME_TARBALL") or None)
+    # Alpine-style task images need a musl build; staging probes the image's libc and picks it.
+    runtime_tarball_musl: str | None = Field(
+        default_factory=lambda: os.environ.get("NOOA_GYM_RUNTIME_TARBALL_MUSL") or None
+    )
     timeout: float = Field(default=900, gt=0)
     close_timeout: float = Field(default=30, gt=0)
     max_policy_calls: int | None = Field(default=None, gt=0)
@@ -166,7 +170,9 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
         )
         if self.config.execution_mode == "sandboxed":
             if self.config.runtime_tarball:
-                state.runtime_python = await stage_runtime(sandbox, self.config.runtime_tarball)
+                state.runtime_python = await stage_runtime(
+                    sandbox, self.config.runtime_tarball, musl_tarball=self.config.runtime_tarball_musl
+                )
             state.session = SandboxSession(
                 sandbox=sandbox,
                 session_dir=f"/tmp/nemo-gym-nooa/{uuid4().hex}",

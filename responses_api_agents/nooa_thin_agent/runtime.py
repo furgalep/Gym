@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build and stage a relocatable NOOA runtime for the task sandbox.
 
-Build (once per architecture, outside any task):
+Build (once per target, outside any task):
     python -m responses_api_agents.nooa_thin_agent.runtime build --output nooa-runtime-x86_64.tar.gz \
         --arch x86_64 <nooa source dirs or requirement specs...>
+    python -m responses_api_agents.nooa_thin_agent.runtime build --output nooa-runtime-x86_64-musl.tar.gz \
+        --target x86_64-unknown-linux-musl <same requirements...>
 
 The tarball is a python-build-standalone interpreter with NOOA installed into
-its own site-packages. Nothing runs ``pip`` inside the sandbox: staging is an
+its own site-packages. Nothing runs ``pip`` inside the sandbox: staging probes
+the image's libc (glibc or musl), picks the matching tarball, then does an
 upload, ``tar -x``, and one import check, cached per tarball digest.
 """
 
@@ -28,13 +31,18 @@ from nemo_gym.sandbox import AsyncSandbox
 
 
 # Same artifacts the mini-SWE adapter pins (uv 0.10.12's manifest). NOOA requires >=3.12.
+# Keyed by target triple: task images are glibc (Debian/Ubuntu) or musl (Alpine), and a
+# glibc interpreter cannot exec on musl (the shell reports exit 127).
 PYTHON_RELEASE = "20260310"
 PYTHON_VERSION = "3.13.12"
 PYTHON_SHA256 = {
-    "x86_64": "904adc9bc4371c01b20f7e75a19b10f07fb577889be02bf21f7f449229b97611",  # pragma: allowlist secret
-    "aarch64": "0ebc0049121318b5de80b887d22abaed55dd302014f73cd6811c9981a83d960e",  # pragma: allowlist secret
+    "x86_64-unknown-linux-gnu": "904adc9bc4371c01b20f7e75a19b10f07fb577889be02bf21f7f449229b97611",  # pragma: allowlist secret
+    "aarch64-unknown-linux-gnu": "0ebc0049121318b5de80b887d22abaed55dd302014f73cd6811c9981a83d960e",  # pragma: allowlist secret
+    "x86_64-unknown-linux-musl": "3c9db1ed094d6d08e474600b7a4eab7cab655b60f7f74c3a41f1d995eb53611a",  # pragma: allowlist secret
 }
 REMOTE_ROOT = "/tmp/nemo-gym-nooa-runtime"
+# One shell line, as nemo_gym.agent_utils.uv_bootstrap probes it: machine, then C library.
+LIBC_PROBE = "uname -m && if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
 # cryptography is excluded by Gym's root resolver policy; the import proves the build used uv.toml.
 HEALTH_CHECK = "import cryptography, mcp, nooa, nooa_bench.gym_worker"
 # Replaces uv's config discovery during the build: inside the Gym checkout the root
@@ -42,11 +50,16 @@ HEALTH_CHECK = "import cryptography, mcp, nooa, nooa_bench.gym_worker"
 UV_CONFIG = Path(__file__).with_name("uv.toml")
 
 
-def python_url(arch: str) -> str:
+def python_url(target: str) -> str:
     return (
         "https://github.com/astral-sh/python-build-standalone/releases/download/"
-        f"{PYTHON_RELEASE}/cpython-{PYTHON_VERSION}%2B{PYTHON_RELEASE}-{arch}-unknown-linux-gnu-install_only_stripped.tar.gz"
+        f"{PYTHON_RELEASE}/cpython-{PYTHON_VERSION}%2B{PYTHON_RELEASE}-{target}-install_only_stripped.tar.gz"
     )
+
+
+def host_target() -> str:
+    libc = "musl" if platform.libc_ver()[0] not in ("glibc", "") else "gnu"
+    return f"{platform.machine()}-unknown-linux-{libc}"
 
 
 def file_sha256(path: Path) -> str:
@@ -54,17 +67,17 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Path | None = None) -> Path:
-    """Produce ``output``: ``python/`` with NOOA and its dependencies installed."""
-    if arch not in PYTHON_SHA256:
-        raise ValueError(f"unsupported architecture {arch!r}; expected one of {sorted(PYTHON_SHA256)}")
+def build_runtime(output: Path, *, target: str, requirements: list[str], cache: Path | None = None) -> Path:
+    """Produce ``output``: ``python/`` with NOOA and its dependencies installed, for ``target``."""
+    if target not in PYTHON_SHA256:
+        raise ValueError(f"unsupported target {target!r}; expected one of {sorted(PYTHON_SHA256)}")
     cache = cache or Path(tempfile.gettempdir()) / "nemo-gym-nooa-runtime-assets"
     cache.mkdir(parents=True, exist_ok=True)
-    archive = cache / python_url(arch).rsplit("/", 1)[1]
-    if not archive.is_file() or file_sha256(archive) != PYTHON_SHA256[arch]:
-        with urllib.request.urlopen(python_url(arch), timeout=120) as response:  # noqa: S310 (pinned https URL)
+    archive = cache / python_url(target).rsplit("/", 1)[1]
+    if not archive.is_file() or file_sha256(archive) != PYTHON_SHA256[target]:
+        with urllib.request.urlopen(python_url(target), timeout=120) as response:  # noqa: S310 (pinned https URL)
             archive.write_bytes(response.read())
-        if file_sha256(archive) != PYTHON_SHA256[arch]:
+        if file_sha256(archive) != PYTHON_SHA256[target]:
             raise RuntimeError("python-build-standalone checksum mismatch")
     with tempfile.TemporaryDirectory(prefix="nooa-runtime-build-") as directory:
         build = Path(directory)
@@ -86,7 +99,7 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
                 specs.append(requirement)
         specs.extend(str(wheel) for wheel in sorted(wheels.glob("*.whl")))
         # Install into the interpreter's own site-packages: no venv, nothing to relocate but the tree.
-        native = platform.machine() == arch
+        native = host_target() == target
         config = ["--config-file", str(UV_CONFIG)]
         if native:
             install = [uv, "pip", "install", *config, "--quiet", "--python", str(python), "--break-system-packages", *specs]
@@ -107,7 +120,7 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
                 "--python-version",
                 PYTHON_VERSION,
                 "--python-platform",
-                f"{arch}-unknown-linux-gnu",
+                target,
                 *specs,
             ]
         subprocess.run(install, check=True)
@@ -127,12 +140,34 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
     return output
 
 
-async def stage_runtime(sandbox: AsyncSandbox, tarball: str | Path) -> str:
+async def probe_libc(sandbox: AsyncSandbox) -> tuple[str, str]:
+    """``(machine, libc)`` of the sandbox image, libc being ``gnu`` or ``musl``."""
+    result = await sandbox.exec(LIBC_PROBE, cwd="/", timeout_s=30)
+    lines = (result.stdout or "").split()
+    if result.return_code != 0 or len(lines) < 2:
+        raise RuntimeError(f"could not probe the sandbox platform (exit {result.return_code}): {result.stderr or ''}")
+    return lines[0], lines[1]
+
+
+async def stage_runtime(
+    sandbox: AsyncSandbox, tarball: str | Path, *, musl_tarball: str | Path | None = None
+) -> str:
     """Make the runtime available in ``sandbox`` and return its interpreter path.
 
-    Keyed by the tarball digest: a sandbox that already holds a healthy copy is reused.
+    ``tarball`` is the glibc build; ``musl_tarball`` serves Alpine-style images, which cannot
+    exec a glibc interpreter. Keyed by the tarball digest: a sandbox that already holds a
+    healthy copy is reused.
     """
-    tarball = Path(tarball)
+    machine, libc = await probe_libc(sandbox)
+    if libc == "musl":
+        if musl_tarball is None:
+            raise RuntimeError(
+                f"sandbox image uses musl libc ({machine}) and no musl NOOA runtime is configured; "
+                "build one with `runtime build --target x86_64-unknown-linux-musl` and set runtime_tarball_musl"
+            )
+        tarball = Path(musl_tarball)
+    else:
+        tarball = Path(tarball)
     digest = file_sha256(tarball)
     target = f"{REMOTE_ROOT}/{digest[:16]}"
     python = f"{target}/python/bin/python3"
@@ -159,10 +194,13 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build")
     build.add_argument("--output", type=Path, required=True)
-    build.add_argument("--arch", choices=sorted(PYTHON_SHA256), required=True)
+    group = build.add_mutually_exclusive_group(required=True)
+    group.add_argument("--target", choices=sorted(PYTHON_SHA256), help="python-build-standalone target triple")
+    group.add_argument("--arch", choices=["x86_64", "aarch64"], help="shorthand for the glibc target of this machine")
     build.add_argument("requirements", nargs="+", help="pip requirement specs or local source directories")
     args = parser.parse_args()
-    path = build_runtime(args.output, arch=args.arch, requirements=args.requirements)
+    target = args.target or f"{args.arch}-unknown-linux-gnu"
+    path = build_runtime(args.output, target=target, requirements=args.requirements)
     print(f"{path} sha256={file_sha256(path)}")
 
 
