@@ -17,6 +17,10 @@ swebench_pro_nooa_thin_resources_server:
   resources_servers:
     swebench_pro:
       allowed_agents: [nooa_thin_agent]
+      # Same verification budget as the PR480 nooa_agent runs (swebench_pro_nooa_resources_server),
+      # so thin-vs-thick comparisons differ only in the integration layer.
+      verification_attempt_timeout: 4500
+      verification_total_timeout: 9600
       datasets:
         - name: swebench_pro
           type: benchmark
