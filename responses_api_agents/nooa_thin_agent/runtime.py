@@ -178,14 +178,33 @@ async def stage_runtime(
     staged = f"{target}.tar.gz"
     await sandbox.exec(f"mkdir -p {shlex.quote(REMOTE_ROOT)}", cwd="/", timeout_s=30)
     await sandbox.upload(tarball, staged)
-    install = (
-        f"set -e; rm -rf {shlex.quote(target + '.tmp')}; mkdir -p {shlex.quote(target + '.tmp')}; "
-        f"tar -xzf {shlex.quote(staged)} -C {shlex.quote(target + '.tmp')}; "
-        f"rm -f {shlex.quote(staged)}; mv -T {shlex.quote(target + '.tmp')} {shlex.quote(target)}; {check}"
+    tmp = shlex.quote(target + ".tmp")
+    # Each step is named on stderr, so a bare exit code (127: command or loader not found) says
+    # which command failed; a failed health check also dumps what the image offers.
+    steps = [
+        ("clean", f"rm -rf {tmp}"),
+        ("mkdir", f"mkdir -p {tmp}"),
+        ("extract", f"tar -xzf {shlex.quote(staged)} -C {tmp}"),
+        ("discard-archive", f"rm -f {shlex.quote(staged)}"),
+        ("rename", f"mv -T {tmp} {shlex.quote(target)}"),
+        ("health-check", check),
+    ]
+    diagnostics = (
+        "echo '--- diagnostics' >&2; "
+        f"(uname -m; {LIBC_PROBE}) 2>&1 | tr '\\n' ' ' >&2; echo >&2; "
+        "echo \"PATH=$PATH\" >&2; command -v sh bash tar gzip mv mkdir rm >&2 2>&1; "
+        f"ls -la {shlex.quote(python)} {shlex.quote(target + '/python/bin')} >&2 2>&1 | head -5; "
+        f"(ldd {shlex.quote(python)} || true) 2>&1 | head -5 >&2; "
+        "(df -k /tmp; mount | grep -w /tmp) 2>&1 | tail -3 >&2"
     )
-    result = await sandbox.exec(install, cwd="/", timeout_s=600)
+    script = " ".join(
+        f"echo '+ {name}' >&2; {command} || {{ rc=$?; echo \"step {name} failed (exit $rc)\" >&2; {diagnostics}; exit $rc; }};"
+        for name, command in steps
+    )
+    result = await sandbox.exec(script, cwd="/", timeout_s=600)
     if result.return_code != 0 or result.error_type:
-        raise RuntimeError(f"NOOA runtime staging failed (exit {result.return_code}): {(result.stderr or '')[-2000:]}")
+        detail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-4000:]
+        raise RuntimeError(f"NOOA runtime staging failed (exit {result.return_code}): {detail}")
     return python
 
 
