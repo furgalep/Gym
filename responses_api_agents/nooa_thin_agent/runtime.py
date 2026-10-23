@@ -35,7 +35,11 @@ PYTHON_SHA256 = {
     "aarch64": "0ebc0049121318b5de80b887d22abaed55dd302014f73cd6811c9981a83d960e",  # pragma: allowlist secret
 }
 REMOTE_ROOT = "/tmp/nemo-gym-nooa-runtime"
-HEALTH_CHECK = "import nooa, nooa_bench.gym_worker"
+# cryptography is excluded by Gym's root resolver policy; the import proves the build used uv.toml.
+HEALTH_CHECK = "import cryptography, mcp, nooa, nooa_bench.gym_worker"
+# Replaces uv's config discovery during the build: inside the Gym checkout the root
+# [tool.uv] exclude-dependencies would silently drop cryptography from the tarball.
+UV_CONFIG = Path(__file__).with_name("uv.toml")
 
 
 def python_url(arch: str) -> str:
@@ -83,8 +87,9 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
         specs.extend(str(wheel) for wheel in sorted(wheels.glob("*.whl")))
         # Install into the interpreter's own site-packages: no venv, nothing to relocate but the tree.
         native = platform.machine() == arch
+        config = ["--config-file", str(UV_CONFIG)]
         if native:
-            install = [uv, "pip", "install", "--quiet", "--python", str(python), "--break-system-packages", *specs]
+            install = [uv, "pip", "install", *config, "--quiet", "--python", str(python), "--break-system-packages", *specs]
         else:
             # Cross-build (for example x86_64 pods from an aarch64 controller): resolve wheels for the
             # target platform without running its interpreter. Everything must ship as a wheel.
@@ -93,6 +98,7 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
                 uv,
                 "pip",
                 "install",
+                *config,
                 "--quiet",
                 "--target",
                 str(site),
@@ -112,7 +118,7 @@ def build_runtime(output: Path, *, arch: str, requirements: list[str], cache: Pa
         else:
             # Can't execute the target interpreter here; the sandbox-side import check in
             # stage_runtime() is the health check for cross-built tarballs.
-            for package in ("nooa", "nooa_bench", "litellm", "httpx"):
+            for package in ("nooa", "nooa_bench", "litellm", "httpx", "mcp", "cryptography", "cffi"):
                 if not (site / package).is_dir():
                     raise RuntimeError(f"cross-build is missing package directory {package!r}")
         output.parent.mkdir(parents=True, exist_ok=True)
