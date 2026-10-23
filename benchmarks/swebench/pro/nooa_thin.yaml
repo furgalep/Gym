@@ -58,7 +58,9 @@ swebench_pro_nooa_thin_agent:
       # Alpine-based task images (musl) need the `--target x86_64-unknown-linux-musl` build;
       # set it here as runtime_tarball_musl or via NOOA_GYM_RUNTIME_TARBALL_MUSL. Staging
       # probes the image's libc and picks the right one.
-      context_window: 1048576
+      # Matches the thick nooa_agent's effective window: its model shim exposes none, so NOOA falls
+      # back to 100K and Atom's summarizer triggers at 75% of it. Same compaction policy on both arms.
+      context_window: 100000
       # Worker ceiling, the same as the PR480 nooa_agent runs. The episode deadline below is sized around it.
       timeout: 21420
       close_timeout: 30
