@@ -7,6 +7,11 @@
 # model (vllm_model with sampling_overrides) and `model_call_capture_dir` from the run's own
 # config; interpolate `${nooa_runtime_tarball}` (and the musl build via runtime_tarball_musl or
 # NOOA_GYM_RUNTIME_TARBALL_MUSL: several TB images are Alpine).
+#
+# Budgets follow each task's canonical task.toml, as the thick nooa_agent runs did: the rows
+# from prepare_nooa_thin.py carry agent_timeout_sec as request metadata and the agent caps its
+# worker by it (ceiling 12,000 s = build-pov-ray). Verification uses one flat timeout at the
+# largest canonical verifier budget, since this resources server has no per-task verifier timeout.
 
 config_paths:
   - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
@@ -21,12 +26,14 @@ terminal_bench_2_1_nooa_thin_resources_server:
       datasets:
         - name: terminal_bench_2_1
           type: benchmark
-          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
-          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/nooa_thin.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare_nooa_thin.py
           num_repeats: 1
+      # Largest canonical verifier budget (build-pov-ray); 16 of 89 tasks exceed the default 1,800.
+      evaluation_timeout: 12000
       sandbox_config:
-        # Outlives the episode deadline below (12,000 s) with an hour and a half to spare.
-        ttl_s: 18000
+        # Same as the thick nooa_agent TB runs: outlives the episode deadline below (30,000 s).
+        ttl_s: 30000
         ready_timeout_s: 1200
 
 terminal_bench_2_1_nooa_thin_agent:
@@ -46,8 +53,8 @@ terminal_bench_2_1_nooa_thin_agent:
       context_window: 1048576
       # Atom's show() images reach the policy as user-turn input_image parts (text-only when empty).
       media_inputs: [image]
-      # Worker ceiling. Align with the thick arm's agent budget before a comparison run.
-      timeout: 7200
+      # Ceiling for the per-task agent_timeout_sec metadata; equals the largest canonical budget.
+      timeout: 12000
       close_timeout: 30
       max_policy_calls: null
 
@@ -55,10 +62,10 @@ terminal_bench_2_1_nooa_thin:
   _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
-      # One deadline bounds seed + agent + verify + close. Budget: sandbox ready 1,200 + runtime
-      # staging ~600 + agent 7,200 + evaluation 1,800 (resources server) + close and slack ~1,200
-      # = 12,000 s.
-      default_episode_timeout_seconds: 12000
+      # One deadline bounds seed + agent + verify + close, the same 30,000 s as the thick
+      # nooa_agent TB runs: sandbox ready 1,200 + runtime staging ~600 + agent up to 12,000 +
+      # verification up to 12,000 + close and slack.
+      default_episode_timeout_seconds: 30000
       resources_server:
         type: resources_servers
         name: terminal_bench_2_1_nooa_thin_resources_server
