@@ -427,12 +427,19 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             # `timeout_exceeded`) during the supervisor's TERM grace; one that left nothing behind
             # is an infrastructure failure, and the supervisor's receipt says which.
             try:
-                return GymEpisode.from_json(await read_text(state.sandbox, path=result))
+                episode = GymEpisode.from_json(await read_text(state.sandbox, path=result))
             except Exception as error:
                 log = (await session.read_output_log())[-4000:]
                 if session.cleanup["timed_out"]:
                     raise TimeoutError(f"NOOA worker was stopped at its {budget:.0f}s budget; tail: {log}") from error
                 raise RuntimeError(f"NOOA worker exited without a result; output log tail: {log}") from error
+            # The supervisor's receipt is the authority on budget stops: a `timeout_exceeded` result it
+            # does not vouch for (a stop the worker was not asked for, or a forged file) is not gradable.
+            if episode.stop_reason == "timeout_exceeded" and not session.cleanup["timed_out"]:
+                raise RuntimeError(
+                    "NOOA worker reported a budget stop, but the supervisor did not stop it at the budget"
+                )
+            return episode
 
         return await session.execute(
             stage_activation=stage, collect=collect, timeout=budget, close_timeout=self.config.close_timeout

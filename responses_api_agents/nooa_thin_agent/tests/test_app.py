@@ -478,3 +478,24 @@ def test_media_inputs_config_is_validated():
     )
     with pytest.raises(Exception, match="gif"):
         app_module.NOOAThinAgentConfig.model_validate({**base, "media_inputs": ["gif"]})
+
+
+def test_a_timeout_result_the_supervisor_does_not_vouch_for_is_a_failure(monkeypatch):
+    """A `timeout_exceeded` result without a timed-out receipt is a stop nobody asked for (or a forged
+    file), not a gradable budget stop."""
+    forged = _episode(stop_reason="timeout_exceeded", calls=1, error="the agent was stopped before it finished")
+
+    async def upload_text(sandbox, *, path, text):
+        pass
+
+    async def read_text(sandbox, *, path):
+        return forged.to_json()
+
+    monkeypatch.setattr(app_module, "upload_text", upload_text)
+    monkeypatch.setattr(app_module, "read_text", read_text)
+    monkeypatch.setattr(NOOAThinAgent, "resolve_model_base_url", lambda self, name, rollout_id=None: "http://h:1/v1")
+    state = _sandboxed_state(_Session(_Sandbox(), timed_out=False))
+    with pytest.raises(RuntimeError, match="supervisor did not stop it at the budget"):
+        asyncio.run(_agent()._execute(state, "task", _body(), "/ng-rollout/r-0/v1/responses"))
+    assert state.failure.startswith("RuntimeError: NOOA worker reported a budget stop")
+    assert _agent()._evidence(state).gaps[0].code == "observation_capture_failed"
