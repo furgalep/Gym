@@ -439,3 +439,19 @@ def test_responses_fences_closing_sessions_and_foreign_retries(monkeypatch):
         await asyncio.gather(first, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_media_inputs_config_is_validated():
+    base = {
+        "host": "127.0.0.1",
+        "port": 1,
+        "entrypoint": "app.py",
+        "name": "nooa_thin_agent",
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+    }
+    assert app_module.NOOAThinAgentConfig.model_validate(base).media_inputs == ()
+    assert app_module.NOOAThinAgentConfig.model_validate({**base, "media_inputs": ["image"]}).media_inputs == (
+        "image",
+    )
+    with pytest.raises(Exception, match="gif"):
+        app_module.NOOAThinAgentConfig.model_validate({**base, "media_inputs": ["gif"]})

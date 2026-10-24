@@ -79,6 +79,10 @@ class NOOAThinAgentConfig(BaseResponsesAPIAgentConfig):
     # Replay prior reasoning items (summary text) to the policy. Off matches the thick nooa_agent,
     # which never replays them; on, Gym's chat-backed servers render them as <think> text.
     replay_reasoning: bool = False
+    # Media the policy accepts, as NOOA's media_inputs. Empty is text-only: NOOA replaces captured
+    # images (Atom's show()) with a short note. Atom puts them in a user turn, which Gym's
+    # chat-backed servers downconvert to image_url parts; tool outputs stay text.
+    media_inputs: tuple[Literal["image", "audio", "video", "pdf"], ...] = ()
     execution_mode: Literal["embedded", "sandboxed"] = "sandboxed"
     # Interpreter inside the sandbox that has NOOA installed. None uses this
     # server's own interpreter, which is only meaningful with a local sandbox.
@@ -369,6 +373,7 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             resource_cookies=resource_cookies,
             context_window=self.config.context_window,
             replay_reasoning=self.config.replay_reasoning,
+            media_inputs=self.config.media_inputs,
         )
         episode.runtime = {"python": sys.executable, "version": sys.version.split()[0]}
         return episode
@@ -393,6 +398,7 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
                 "agent_kwargs": self.config.agent_kwargs,
                 "context_window": self.config.context_window,
                 "replay_reasoning": self.config.replay_reasoning,
+                "media_inputs": list(self.config.media_inputs),
                 "model_url": model_url,
                 "max_policy_calls": self.config.max_policy_calls,
                 "shell_timeout_seconds": self.config.shell_timeout_seconds,

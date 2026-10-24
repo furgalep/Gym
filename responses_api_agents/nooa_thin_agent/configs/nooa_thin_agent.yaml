@@ -12,6 +12,7 @@ nooa_thin_agent:
       agent: nooa_bench.gym:ShellAgent
       agent_kwargs: {}            # e.g. {turn_method: handle_orchestrate} for nooa_atom.gym:AtomHarness
       context_window: null        # policy context window for NOOA's budgeting
+      media_inputs: []            # what the policy accepts: image, audio, video, pdf; empty = text-only
       # embedded: NOOA runs in this server and shells into the sandbox.
       # sandboxed: NOOA runs inside the sandbox as `python -m nooa_bench.gym_worker`.
       execution_mode: sandboxed

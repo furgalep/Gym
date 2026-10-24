@@ -104,7 +104,7 @@ async def _serve(app: FastAPI):
     return server, task, sock.getsockname()[1]
 
 
-async def _harness_requests(agent_factory, invoke, script) -> tuple[list[dict], object]:
+async def _harness_requests(agent_factory, invoke, script, **episode_kwargs) -> tuple[list[dict], object]:
     bodies: list[dict] = []
     server, task, port = await _serve(_policy_app(bodies, script))
     try:
@@ -113,6 +113,7 @@ async def _harness_requests(agent_factory, invoke, script) -> tuple[list[dict], 
             invoke,
             model_url=f"http://127.0.0.1:{port}/ng-rollout/preflight/v1",
             max_policy_calls=len(script) + 1,
+            **episode_kwargs,
         )
     finally:
         server.should_exit = True
@@ -178,3 +179,75 @@ def test_atom_requests_downconvert_to_chat_completions(tmp_path, monkeypatch):
     # Every executed cell is a tool record; the finishing one is also recorded as return_result.
     names = {t.name for t in episode.tool_calls}
     assert names == {"python_cell", "return_result"}, names
+
+
+# A 1x1 PNG. Atom's show() attaches it to the cell's output; the next request must carry it.
+PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+IMAGE_SCRIPT = [
+    [
+        _call(
+            "python_cell",
+            code="import base64\nfrom nooa.media import Image\n"
+            f"show(Image.from_bytes(base64.b64decode('{PNG_1X1}'), media_type='image/png'))\nprint('shown')",
+        )
+    ],
+    [
+        _call(
+            "python_cell",
+            code="return_result(Done(explanation='saw it', result=TaskResult("
+            "solution_description='x', evidence='x', how_to_verify='x', report='x')))",
+        )
+    ],
+]
+
+
+def _image_parts(chat) -> list[dict]:
+    parts = []
+    for m in chat.messages:
+        content = m["content"] if isinstance(m, dict) else m.content
+        if isinstance(content, list):
+            parts.extend(p for p in content if (p["type"] if isinstance(p, dict) else p.type) == "image_url")
+    return parts
+
+
+@pytest.mark.parametrize("media_inputs", [("image",), ()])
+def test_atom_show_images_downconvert_to_chat_completions(tmp_path, monkeypatch, media_inputs):
+    """With media on, the image rides a user turn as input_image (with the detail Gym's schema requires)
+    and becomes a chat image_url part; off, NOOA replaces it with a note. Tool outputs stay text either
+    way: a chat-backed vllm_model in strict mode refuses image parts there."""
+    atom_gym = pytest.importorskip("nooa_atom.gym", reason="nooa-atom not installed in this venv")
+    workdir = tmp_path / "task"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    bodies, _ = asyncio.run(
+        _harness_requests(
+            lambda llm: atom_gym.AtomHarness(
+                llm, turn_method="handle_batch", workdir=str(workdir), sessions_dir=str(tmp_path / "sessions")
+            ),
+            lambda agent: agent.solve("Show the image, then finish."),
+            IMAGE_SCRIPT,
+            media_inputs=media_inputs,
+        )
+    )
+    second = bodies[1]
+    images = [
+        part
+        for item in second["input"]
+        if item.get("role") == "user" and isinstance(item.get("content"), list)
+        for part in item["content"]
+        if part["type"] == "input_image"
+    ]
+    for item in second["input"]:
+        if item.get("type") == "function_call_output" and isinstance(item["output"], list):
+            # Never an image in a tool output: chat tool messages carry text only.
+            assert all(part["type"] == "input_text" for part in item["output"]), item
+    converted = _downconvert_all(bodies)  # strict: raises if anything is unrepresentable
+    if media_inputs:
+        assert (
+            len(images) == 1 and images[0]["detail"] == "auto" and images[0]["image_url"].startswith("data:image/png")
+        )
+        (part,) = _image_parts(converted[1])
+        assert part["image_url"]["url"].startswith("data:image/png") and part["image_url"]["detail"] == "auto"
+    else:
+        assert not images and not _image_parts(converted[1])
+        assert any("image" in json.dumps(item).lower() for item in second["input"] if item.get("role") == "user")

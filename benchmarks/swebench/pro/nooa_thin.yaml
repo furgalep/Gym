@@ -52,7 +52,8 @@ swebench_pro_nooa_thin_agent:
         name: swebench_pro_nooa_thin_resources_server
       agent: nooa_atom.gym:AtomHarness
       agent_kwargs:
-        turn_method: handle_batch
+        # Same turn method as the thick nooa_agent comparison arms (handle_orchestrate).
+        turn_method: handle_orchestrate
       execution_mode: sandboxed
       runtime_tarball: ${nooa_runtime_tarball}
       # Alpine-based task images (musl) need the `--target x86_64-unknown-linux-musl` build;
@@ -61,6 +62,9 @@ swebench_pro_nooa_thin_agent:
       # Same as the PR480 nooa_agent runs (their frozen Gym threads config.context_window into
       # GymResponsesLLM), so both arms budget and compact identically.
       context_window: 1048576
+      # Kimi K3 reads images on our endpoint; Atom's show() images reach it as user-turn
+      # input_image parts (text-only when this is empty).
+      media_inputs: [image]
       # Worker ceiling, the same as the PR480 nooa_agent runs. The episode deadline below is sized around it.
       timeout: 21420
       close_timeout: 30
