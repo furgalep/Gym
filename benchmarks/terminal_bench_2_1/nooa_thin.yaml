@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Terminal-Bench 2.1 on the thin NOOA agent running Atom inside the task sandbox.
+# Same shape as benchmarks/swebench/pro/nooa_thin.yaml: resources server + agent +
+# single_agent_turn_legacy environment, datasets on the resources server. Supply the policy
+# model (vllm_model with sampling_overrides) and `model_call_capture_dir` from the run's own
+# config; interpolate `${nooa_runtime_tarball}` (and the musl build via runtime_tarball_musl or
+# NOOA_GYM_RUNTIME_TARBALL_MUSL: several TB images are Alpine).
+
+config_paths:
+  - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+  - responses_api_agents/nooa_thin_agent/configs/nooa_thin_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+terminal_bench_2_1_nooa_thin_resources_server:
+  _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      allowed_agents: [nooa_thin_agent]
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 1
+      sandbox_config:
+        # Outlives the episode deadline below (12,000 s) with an hour and a half to spare.
+        ttl_s: 18000
+        ready_timeout_s: 1200
+
+terminal_bench_2_1_nooa_thin_agent:
+  _inherit_from: nooa_thin_agent
+  responses_api_agents:
+    nooa_thin_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_2_1_nooa_thin_resources_server
+      agent: nooa_atom.gym:AtomHarness
+      agent_kwargs:
+        # Same turn method as the thick nooa_agent comparison arms.
+        turn_method: handle_orchestrate
+      execution_mode: sandboxed
+      runtime_tarball: ${nooa_runtime_tarball}
+      # Same as the thick nooa_agent runs, so both arms budget and compact identically.
+      context_window: 1048576
+      # Atom's show() images reach the policy as user-turn input_image parts (text-only when empty).
+      media_inputs: [image]
+      # Worker ceiling. Align with the thick arm's agent budget before a comparison run.
+      timeout: 7200
+      close_timeout: 30
+      max_policy_calls: null
+
+terminal_bench_2_1_nooa_thin:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      # One deadline bounds seed + agent + verify + close. Budget: sandbox ready 1,200 + runtime
+      # staging ~600 + agent 7,200 + evaluation 1,800 (resources server) + close and slack ~1,200
+      # = 12,000 s.
+      default_episode_timeout_seconds: 12000
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_2_1_nooa_thin_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_2_1_nooa_thin_agent
