@@ -387,6 +387,29 @@ def test_a_timed_out_worker_is_a_504_with_the_log_tail(worker_without_result):
     assert state.failure == "timeout_exceeded"
 
 
+def test_a_timed_out_worker_that_checkpointed_is_graded_as_incomplete(monkeypatch):
+    """The supervisor's TERM grace lets the worker write its partial episode; Gym then verifies
+    the sandbox instead of failing the rollout (Terminal-Bench grades after an agent timeout)."""
+    checkpoint = _episode(stop_reason="timeout_exceeded", calls=1, error="the agent was stopped before it finished")
+
+    async def upload_text(sandbox, *, path, text):
+        pass
+
+    async def read_text(sandbox, *, path):
+        return checkpoint.to_json()
+
+    monkeypatch.setattr(app_module, "upload_text", upload_text)
+    monkeypatch.setattr(app_module, "read_text", read_text)
+    monkeypatch.setattr(NOOAThinAgent, "resolve_model_base_url", lambda self, name, rollout_id=None: "http://h:1/v1")
+    state = _sandboxed_state(_Session(_Sandbox(), timed_out=True))
+    response = asyncio.run(_agent()._execute(state, "task", _body(), "/ng-rollout/r-0/v1/responses"))
+    assert response.status == "incomplete" and response.error is None
+    assert state.failure is None
+    evidence = _agent()._evidence(state)
+    assert {r.status for r in evidence.records if hasattr(r, "stop_reason")} == {"incomplete"}
+    assert evidence.gaps[0].code == "timeout_exceeded"
+
+
 def test_a_crashed_worker_surfaces_its_log_and_is_recorded_as_the_failure(worker_without_result):
     state = _sandboxed_state(_Session(_Sandbox(), timed_out=False))
     with pytest.raises(RuntimeError, match="without a result.*ModuleNotFoundError"):

@@ -159,6 +159,12 @@ def _task_text(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
     return "\n\n".join(section for section in [*sections, *users] if section)
 
 
+# Stops that leave a gradable sandbox: the policy ran out of budget, or the supervisor stopped
+# the worker at the agent's time budget and it checkpointed its episode. Gym grades these as
+# incomplete; every other non-completed stop is an error.
+_INCOMPLETE_STOP_REASONS = frozenset({"policy_budget_exceeded", "max_output_tokens_exceeded", "timeout_exceeded"})
+
+
 def _zero_usage() -> NeMoGymResponseUsage:
     return NeMoGymResponseUsage(
         input_tokens=0,
@@ -417,7 +423,9 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             return SandboxCommand(argv=[python, "-I", "-m", "nooa_bench.gym_worker", inputs, result], python=python)
 
         async def collect() -> GymEpisode:
-            # A worker stopped at its budget never writes result.json; the supervisor's receipt says so.
+            # A worker stopped at its budget checkpoints the episode it has (stop reason
+            # `timeout_exceeded`) during the supervisor's TERM grace; one that left nothing behind
+            # is an infrastructure failure, and the supervisor's receipt says which.
             try:
                 return GymEpisode.from_json(await read_text(state.sandbox, path=result))
             except Exception as error:
@@ -453,7 +461,7 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
         else:
             usage = None  # the provider omitted usage: counts are unknown, never invented
         status, error = "completed", None
-        if episode.stop_reason in {"policy_budget_exceeded", "max_output_tokens_exceeded"}:
+        if episode.stop_reason in _INCOMPLETE_STOP_REASONS:
             status = "incomplete"
         elif episode.stop_reason != "completed":
             status, error = "failed", {"code": "server_error", "message": episode.error or episode.stop_reason}
@@ -488,11 +496,13 @@ class NOOAThinAgent(SimpleResponsesAPIAgent):
             return AgentObservationBundle(source="nooa", gaps=gaps)
         if episode.error:
             gaps.append(ObservationGap(code=episode.stop_reason, detail=episode.error))
-        status = {
-            "completed": "completed",
-            "policy_budget_exceeded": "incomplete",
-            "max_output_tokens_exceeded": "incomplete",
-        }.get(episode.stop_reason, "failed")
+        status = (
+            "completed"
+            if episode.stop_reason == "completed"
+            else "incomplete"
+            if episode.stop_reason in _INCOMPLETE_STOP_REASONS
+            else "failed"
+        )
         ordered = [
             *(c.invocation_id for c in episode.model_calls),
             *(t.invocation_id for t in episode.tool_calls),
