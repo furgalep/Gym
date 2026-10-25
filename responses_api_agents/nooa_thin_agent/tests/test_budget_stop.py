@@ -272,17 +272,22 @@ async def test_slow_agent_cleanup_cannot_defeat_the_checkpoint(tmp_path, monkeyp
     assert response.status == "incomplete" and agent_outcome_policy(response) is OutcomeAction.VERIFY
 
 
-async def test_supervisor_kill_without_grace_leaves_no_result_and_fails(tmp_path, monkeypatch):
+async def test_a_stop_before_the_run_starts_leaves_no_result_and_fails(tmp_path, monkeypatch):
+    """A worker stopped while it is still importing NOOA has no handler installed yet and no
+    episode to render: nothing is left behind, and Gym keeps the infrastructure failure (504).
+    (With the checkpoint written inside the SIGTERM handler, a stop during the run leaves a
+    result within milliseconds, so "no result" needs a stop before the run starts.)"""
     log: list[dict] = []
     release = asyncio.Event()
     server, task, port = await _serve(_stalling_app(log, release))
     try:
-        run = await _supervised_worker(tmp_path, port, budget=15, grace=0.001)
+        run = await _supervised_worker(tmp_path, port, budget=1, grace=10)
     finally:
         release.set()
         server.should_exit = True
         await task
-    assert run.receipt["timed_out"] is True
+    assert log == []  # the stop came before the first model call
+    assert run.receipt["timed_out"] is True and run.receipt["cleanup_confirmed"] is True
     assert not run.result.exists()
     with pytest.raises(app_module.HTTPException) as info:
         await _collect_through_the_agent(run, monkeypatch)
@@ -331,3 +336,33 @@ async def test_sigint_leaves_no_result(tmp_path):
         server.should_exit = True
         await task
     assert code != 0 and not result.exists()
+
+
+@pytest.mark.parametrize(
+    ("agent", "teardown"),
+    [
+        ("probe_agents:SwallowingAgent", "completed: None"),
+        ("probe_agents:RaisingCleanupAgent", "error: RuntimeError: teardown failed"),
+    ],
+)
+async def test_the_stop_classifies_the_episode_whatever_the_teardown_reports(tmp_path, monkeypatch, agent, teardown):
+    """An agent that swallows the cancellation, or whose teardown raises, cannot turn a budget stop
+    into a completed or errored episode: the final write keeps timeout_exceeded and records what the
+    teardown reported as a diagnostic."""
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    try:
+        run = await _supervised_worker(tmp_path, port, budget=15, grace=10, agent=agent)
+    finally:
+        release.set()
+        server.should_exit = True
+        await task
+    assert len(log) == 2 and run.receipt["timed_out"] is True and run.code == 0
+    episode = GymEpisode.from_json(run.result.read_text())
+    assert episode.stop_reason == "timeout_exceeded" and episode.runtime["stop_signal"] == "SIGTERM"
+    assert episode.runtime["teardown"].startswith(teardown)
+    state, response = await _collect_through_the_agent(run, monkeypatch)
+    assert response.status == "incomplete" and response.error is None
+    assert response.metadata["harness_teardown"].startswith(teardown)
+    assert agent_outcome_policy(response) is OutcomeAction.VERIFY

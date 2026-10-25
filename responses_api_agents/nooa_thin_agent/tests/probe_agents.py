@@ -40,3 +40,33 @@ class SelfCancellingAgent(ShellAgent):
         asyncio.current_task().cancel()
         await asyncio.sleep(0)
         return "unreachable"
+
+
+class SwallowingAgent(ShellAgent):
+    """The agent catches the cancellation and reports success anyway."""
+
+    @strategy(ToolLoopStrategy(("shell",)))
+    async def act(self, task: str) -> str:
+        """Complete the task with the shell tool, then reply with the final answer as plain text."""
+        ...
+
+    async def solve(self, task: str) -> str:
+        try:
+            return await self.act(task)
+        except asyncio.CancelledError:
+            return "done anyway"
+
+
+class RaisingCleanupAgent(ShellAgent):
+    """The agent's teardown raises while the cancellation unwinds."""
+
+    @strategy(ToolLoopStrategy(("shell",)))
+    async def act(self, task: str) -> str:
+        """Complete the task with the shell tool, then reply with the final answer as plain text."""
+        ...
+
+    async def solve(self, task: str) -> str:
+        try:
+            return await self.act(task)
+        finally:
+            raise RuntimeError("teardown failed")
