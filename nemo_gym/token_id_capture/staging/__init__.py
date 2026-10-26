@@ -55,6 +55,7 @@ from nemo_gym.token_id_capture.staging.rebuild import (
     WeightVersionSpan,
     linearize,
     verify_and_linearize,
+    verify_and_linearize_all,
 )
 from nemo_gym.token_id_capture.staging.records import (
     CallRecord,
@@ -80,7 +81,12 @@ from nemo_gym.token_id_capture.staging.routes import (
     encode_routed_experts,
     routed_experts_token_count,
 )
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.token_id_capture.staging.terminal import (
+    BranchSelection,
+    TerminalSelection,
+    select_branch_terminals,
+    select_terminal_call,
+)
 
 # Terminal selection is shared with the existing capture path.
 # Rows with a ``staging_key`` use their recorded response and content fingerprints.
@@ -126,6 +132,7 @@ __all__ = [
     "StagingSource",
     "StreamingUnsupportedError",
     "TerminalAttribution",
+    "BranchSelection",
     "TerminalSelection",
     "WeightVersionProvider",
     "WeightVersionSpan",
@@ -144,7 +151,9 @@ __all__ = [
     "load_golden_vectors",
     "routed_experts_token_count",
     "resolve_terminal",
+    "select_branch_terminals",
     "select_terminal_call",
     "staging_key",
     "verify_and_linearize",
+    "verify_and_linearize_all",
 ]

@@ -163,6 +163,12 @@ class TokenIdCaptureSettings(BaseModel):
     # ``False`` keeps the sample when terminal attribution delivered its chain whole, which
     # places the uncaptured call outside the trajectory the verifier scored.
     mask_incomplete_when_attributed: bool = True
+    # Also deliver branch chains: chains that begin at a root the main chain does not share,
+    # such as a sub-agent's calls. They ride on the rollout record under
+    # ``_ng_token_capture_branches`` as Responses objects shaped like the rebuilt ``response``.
+    # ``response.output`` still carries only the main chain, so a trainer that reads one
+    # sequence per rollout is unaffected; one that accepts several reads the branches too.
+    deliver_branch_chains: bool = False
     # Abort when the finalized-rollout masked fraction exceeds this limit.
     # Enforcement begins after ``mask_fraction_min_samples`` observations.
     # ``None`` disables the kill switch.

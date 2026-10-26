@@ -34,6 +34,7 @@ from pathlib import Path
 
 from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
+    project_branch_chain_responses,
     project_main_chain_response,
     run_builder,
 )
@@ -97,6 +98,7 @@ def _assemble(
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
     declared_response_id: str | None = None,
+    deliver_branch_chains: bool = False,
 ) -> dict:
     # Attribute the verified terminal before building.
     # ``verified_response`` is the scored response from the /run result.
@@ -173,6 +175,15 @@ def _assemble(
         # Calls without generated tokens have no training signal.
         # A nonzero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
+        # Chains beside the main one, by relation, and why any were withheld from delivery.
+        # ``delivered`` counts the branch responses this build hands over; it is zero unless
+        # ``deliver_branch_chains`` is set and the main chain is attributed.
+        "branch_chains": {
+            "by_relation": dict(notes.branch_chains),
+            "excluded": dict(notes.branches_excluded),
+            "generated_tokens": notes.branch_generated_tokens,
+            "delivered": 0,
+        },
     }
     unresolved = notes.unresolved_retries
     if notes.terminal_chain == "delivered":
@@ -191,15 +202,49 @@ def _assemble(
         mask = bool(unresolved) or bool(notes.unresolved_parent_calls) or notes.roots != 1 or notes.chains != 1
     # An empty delivery must never be trainable, whatever produced it.
     mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
+
+    # Branch chains ride beside the main chain only when the verifier-scored chain is known:
+    # without attribution a rollout with more than one chain is masked, so there is nothing to
+    # add them to. A branch that fails projection is withheld on its own; the main chain stands.
+    branch_responses: list[dict] = []
+    if deliver_branch_chains and not mask and notes.terminal_chain == "delivered":
+        for branch in project_branch_chain_responses(rollout_id, out, model=model):
+            try:
+                assert_prefix_contiguity(branch)
+            except AssertionError:
+                logger.warning(
+                    "Branch chain %s of rollout %s is not prefix-contiguous; it is withheld.",
+                    branch["_ng_chain"]["chain_id"],
+                    rollout_id,
+                )
+                excluded = metrics["branch_chains"]["excluded"]
+                excluded["projection_error"] = excluded.get("projection_error", 0) + 1
+                continue
+            branch_responses.append(branch)
+        metrics["branch_chains"]["delivered"] = len(branch_responses)
     return {
         "rollout_id": rollout_id,
         "builder": builder,
         "rebuilt_response": response,
+        "branch_responses": branch_responses,
         "metrics": metrics,
         "mask_sample": mask,
         "unresolved_retries": list(unresolved),
         "unresolved_parent_calls": list(notes.unresolved_parent_calls),
     }
+
+
+def _mask_incomplete(built: dict) -> None:
+    """Mask a build whose snapshot is incomplete and take its branch chains back.
+
+    The uncommitted call could sit on any chain, so nothing from this rollout is delivered,
+    and the metric says so.
+    """
+    built["mask_sample"] = True
+    built["branch_responses"] = []
+    branch_metrics = built.get("metrics", {}).get("branch_chains")
+    if isinstance(branch_metrics, dict):
+        branch_metrics["delivered"] = 0
 
 
 def _incomplete_masks(built: dict, *, always: bool) -> bool:
@@ -233,6 +278,13 @@ def mask_incomplete_when_attributed_from_config(global_config_dict) -> bool:
     return TokenIdCaptureConfig.model_validate(global_config_dict).token_id_capture.mask_incomplete_when_attributed
 
 
+def deliver_branch_chains_from_config(global_config_dict) -> bool:
+    """Return the ``token_id_capture.deliver_branch_chains`` setting."""
+    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+
+    return TokenIdCaptureConfig.model_validate(global_config_dict).token_id_capture.deliver_branch_chains
+
+
 def trajectories_for_rollout(
     rollout_id: str,
     token_capture_dirs: list[Path],
@@ -242,6 +294,7 @@ def trajectories_for_rollout(
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
     mask_incomplete_when_attributed: bool = True,
+    deliver_branch_chains: bool = False,
 ) -> dict | None:
     """Build trajectories from a frozen local token-store snapshot.
 
@@ -251,6 +304,7 @@ def trajectories_for_rollout(
     ``mask_incomplete_when_attributed`` set to ``False`` it masks only when
     terminal attribution did not deliver its chain, because a delivered chain
     places the uncaptured call off the scored path.
+    ``deliver_branch_chains`` adds each deliverable branch chain under ``branch_responses``.
     """
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
@@ -269,11 +323,12 @@ def trajectories_for_rollout(
                 model,
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
+                deliver_branch_chains=deliver_branch_chains,
             )
         if snapshot.incomplete:
             built.setdefault("metrics", {})["capture_incomplete"] = True
             if _incomplete_masks(built, always=mask_incomplete_when_attributed):
-                built["mask_sample"] = True
+                _mask_incomplete(built)
         built["_capture_snapshot"] = {
             "snapshot_id": snapshot.snapshot_id,
             "version": snapshot.version,
@@ -292,6 +347,7 @@ async def trajectories_from_source(
     explicit_terminal_call_id: str | None = None,
     mask_incomplete_when_attributed: bool = True,
     declared_response_id: str | None = None,
+    deliver_branch_chains: bool = False,
 ) -> dict | None:
     """Build trajectories from a frozen ``TokenSource`` snapshot.
 
@@ -303,6 +359,7 @@ async def trajectories_from_source(
     ``mask_incomplete_when_attributed`` set to ``False`` it masks only when
     terminal attribution did not deliver its chain, because a delivered chain
     places the uncaptured call off the scored path.
+    ``deliver_branch_chains`` adds each deliverable branch chain under ``branch_responses``.
     """
     try:
         snapshot = await source.freeze(rollout_id)
@@ -322,12 +379,13 @@ async def trajectories_from_source(
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
                 declared_response_id=declared_response_id,
+                deliver_branch_chains=deliver_branch_chains,
             )
         )
     if snapshot.incomplete:
         built.setdefault("metrics", {})["capture_incomplete"] = True
         if _incomplete_masks(built, always=mask_incomplete_when_attributed):
-            built["mask_sample"] = True
+            _mask_incomplete(built)
     built["_capture_snapshot"] = {
         "snapshot_id": snapshot.snapshot_id,
         "version": snapshot.version,

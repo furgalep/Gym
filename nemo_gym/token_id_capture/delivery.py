@@ -48,6 +48,10 @@ TOKEN_CAPTURE_KEY = "_ng_token_capture"
 # A consumer reads this top-level field to exclude a rollout from the loss.
 # The field stays outside TOKEN_CAPTURE_KEY for direct access.
 MASK_SAMPLE_KEY = "mask_sample"
+# Branch chains delivered beside ``response``: a list of Responses objects, each a sub-agent's or
+# auxiliary call's own root-to-terminal chain with contiguous token fields. Present only when
+# ``token_id_capture.deliver_branch_chains`` is set and the rollout is not masked.
+BRANCH_RESPONSES_KEY = "_ng_token_capture_branches"
 _REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 
 # A caller that knows the kept model call names it here on the result.
@@ -86,7 +90,11 @@ def _unusable(result: dict, error: str, message: str) -> dict:
 
 
 async def finalize_rollout_token_capture(
-    result: dict, source: TokenSource | None, *, mask_incomplete_when_attributed: bool = True
+    result: dict,
+    source: TokenSource | None,
+    *,
+    mask_incomplete_when_attributed: bool = True,
+    deliver_branch_chains: bool = False,
 ) -> dict | None:
     """Rebuild one finished rollout record's ``response.output`` from its recorded token ids.
 
@@ -119,6 +127,10 @@ async def finalize_rollout_token_capture(
     ``mask_incomplete_when_attributed`` is the
     ``token_id_capture.mask_incomplete_when_attributed`` setting, which decides
     whether an incomplete snapshot always masks the rollout.
+    ``deliver_branch_chains`` is the ``token_id_capture.deliver_branch_chains``
+    setting: an unmasked build then puts each deliverable branch chain on the
+    record under ``BRANCH_RESPONSES_KEY``, and ``response.output`` still carries
+    only the main chain.
     """
     if source is None:
         return None
@@ -177,6 +189,7 @@ async def finalize_rollout_token_capture(
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
             mask_incomplete_when_attributed=mask_incomplete_when_attributed,
             declared_response_id=str(declared_terminal) if declared_terminal else None,
+            deliver_branch_chains=deliver_branch_chains,
         )
     except Exception as error:
         # A transport failure may be unrelated to this rollout.
@@ -223,6 +236,10 @@ async def finalize_rollout_token_capture(
             "it is marked for masking rather than trained on.",
             stacklevel=2,
         )
+    elif built.get("branch_responses"):
+        # A masked rollout delivers nothing, so its branch chains stay off the record too: an
+        # incomplete snapshot's uncaptured call could sit on any of them.
+        result[BRANCH_RESPONSES_KEY] = list(built["branch_responses"])
     result[TOKEN_CAPTURE_KEY] = record_metrics
 
     return built

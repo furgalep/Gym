@@ -39,6 +39,7 @@ from nemo_gym.token_id_capture.builder import (
     Chain,
     assert_prefix_contiguity,
     prefix_merging,
+    project_branch_chain_responses,
     project_chain_to_output_items,
     project_main_chain_response,
     run_builder,
@@ -46,6 +47,7 @@ from nemo_gym.token_id_capture.builder import (
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 from nemo_gym.token_id_capture.consumer import (
     clear_token_captures_for_rollouts,
+    deliver_branch_chains_from_config,
     mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
@@ -170,6 +172,7 @@ __all__ = [
     "stamp_continuation",
     "prefix_merging",
     "project_chain_to_output_items",
+    "project_branch_chain_responses",
     "project_main_chain_response",
     "run_builder",
     "assert_prefix_contiguity",
@@ -178,4 +181,5 @@ __all__ = [
     "trajectories_from_source",
     "token_id_capture_dirs_from_config",
     "mask_incomplete_when_attributed_from_config",
+    "deliver_branch_chains_from_config",
 ]

@@ -44,6 +44,18 @@ class TerminalSelection:
     reason: str
 
 
+@dataclass(frozen=True)
+class BranchSelection:
+    """The terminal calls of branch chains, and the roots whose chain could not be followed.
+
+    ``terminal_model_call_ids`` lists one leaf per deliverable branch root in root admission
+    order. ``excluded`` counts, by reason, the branch roots whose subtree offered no single leaf.
+    """
+
+    terminal_model_call_ids: list[str]
+    excluded: dict[str, int]
+
+
 def _root_order_key(records: Sequence[CallRecord]):
     """Order candidate roots by admission time, unstamped rows last.
 
@@ -111,3 +123,72 @@ def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
         if len(pool) > 1:
             return TerminalSelection(None, AMBIGUOUS_TERMINAL)
         node = pool[0]
+
+
+def select_branch_terminals(records: Sequence[CallRecord], terminal_model_call_id: str) -> BranchSelection:
+    """Select the terminal call of each branch chain beside the terminal chain.
+
+    A branch chain is rooted at a call the terminal chain does not share, which is how a
+    sub-agent's calls appear: its first prompt carries no model-authored history, so it is
+    admitted as a root. The walk from each such root follows the rule ``select_terminal_call``
+    applies, preferring children with descendants over childless siblings and stopping when
+    more than one preferred child remains. Roots are visited in admission order.
+
+    A fork off the terminal chain's own root is not a branch chain: the harness did not keep
+    its output on the scored path, so it is never selected.
+    """
+    by_id = {record.model_call_id: record for record in records}
+    if len(by_id) != len(records) or terminal_model_call_id not in by_id:
+        return BranchSelection([], {DUPLICATE_CALL_ID if len(by_id) != len(records) else "missing_terminal": 1})
+    for record in records:
+        if record.parent_call_id is not None and record.parent_call_id not in by_id:
+            return BranchSelection([], {ORPHANED_ROW: 1})
+
+    children: dict[str, list[CallRecord]] = {}
+    roots: list[CallRecord] = []
+    for record in records:
+        if record.parent_call_id is None:
+            roots.append(record)
+        else:
+            children.setdefault(record.parent_call_id, []).append(record)
+
+    terminal_root: CallRecord | None = by_id[terminal_model_call_id]
+    visited: set[str] = set()
+    while terminal_root is not None and terminal_root.parent_call_id is not None:
+        if terminal_root.model_call_id in visited:
+            return BranchSelection([], {NO_ROOT: 1})
+        visited.add(terminal_root.model_call_id)
+        terminal_root = by_id.get(terminal_root.parent_call_id)
+    if terminal_root is None:
+        return BranchSelection([], {NO_ROOT: 1})
+
+    def survivors(candidates: list[CallRecord]) -> list[CallRecord]:
+        extended = [record for record in candidates if children.get(record.model_call_id)]
+        return extended or candidates
+
+    terminals: list[str] = []
+    excluded: dict[str, int] = {}
+    for root in sorted(roots, key=_root_order_key(records)):
+        if root.model_call_id == terminal_root.model_call_id:
+            continue
+        node = root
+        seen: set[str] = set()
+        reason = ""
+        while True:
+            if node.model_call_id in seen:
+                reason = NO_ROOT
+                break
+            seen.add(node.model_call_id)
+            candidates = children.get(node.model_call_id) or []
+            if not candidates:
+                break
+            pool = survivors(candidates)
+            if len(pool) > 1:
+                reason = AMBIGUOUS_TERMINAL
+                break
+            node = pool[0]
+        if reason:
+            excluded[reason] = excluded.get(reason, 0) + 1
+        else:
+            terminals.append(node.model_call_id)
+    return BranchSelection(terminals, excluded)

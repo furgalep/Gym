@@ -19,6 +19,7 @@ from nemo_gym.token_id_capture.staging.digest import (
 from nemo_gym.token_id_capture.staging.rebuild import (
     ReceiptVerificationError,
     verify_and_linearize,
+    verify_and_linearize_all,
 )
 from nemo_gym.token_id_capture.staging.records import (
     CallRecord,
@@ -547,3 +548,108 @@ def test_a_finish_reason_disagreement_in_the_attribution_trail_withholds_the_ver
         assert row.incomplete_reason is None
     # A receipt without a trail, from a framework that records none, resolves as before.
     assert verify_and_linearize(receipt_for("main", None), snapshots).finish_reason_resolved is True
+
+
+# --- branch chains ------------------------------------------------------------------
+
+
+def _with_sub_agent() -> tuple[list[StagedCallBaseSnapshot], list[CallRecord]]:
+    """The branched receipt's calls plus a sub-agent chain rooted at its own call."""
+    _, snapshots = _branched()
+    sub1 = _snapshot(
+        "sub1",
+        token_ids=[40, 41, 42],
+        masks=[0.0, 0.0, 1.0],
+        logprobs=[0.0, 0.0, -0.5],
+        weight_version=5,
+    )
+    sub2 = _snapshot(
+        "sub2",
+        parent_call_id="sub1",
+        prev_len=3,
+        token_ids=[50, 51],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.6],
+        weight_version=5,
+        parent=sub1,
+    )
+    snapshots = snapshots + [sub1, sub2]
+    return snapshots, [_manifest_row(snapshot) for snapshot in snapshots]
+
+
+def _receipt_with_branches(manifest: list[CallRecord], *, terminal: str, branches: list[str]) -> RolloutReceipt:
+    return RolloutReceipt(
+        rollout_id="rollout-1",
+        terminal_model_call_id=terminal,
+        manifest=manifest,
+        terminal_selection="declared",
+        branch_terminal_model_call_ids=branches,
+    )
+
+
+def test_verify_and_linearize_all_adds_one_row_per_branch_after_the_terminal_row() -> None:
+    snapshots, manifest = _with_sub_agent()
+    receipt = _receipt_with_branches(manifest, terminal="main", branches=["sub2"])
+
+    terminal_row, branch_row = verify_and_linearize_all(receipt, snapshots)
+
+    assert terminal_row == verify_and_linearize(receipt, snapshots)
+    assert terminal_row.chain == "terminal" and terminal_row.model_call_ids == ["root", "main"]
+    assert branch_row.chain == "branch"
+    assert branch_row.model_call_ids == ["sub1", "sub2"]
+    assert branch_row.token_ids == [40, 41, 42, 50, 51]
+    assert branch_row.token_mask == [0.0, 0.0, 1.0, 0.0, 1.0]
+    assert branch_row.logprobs == [0.0, 0.0, -0.5, 0.0, -0.6]
+    assert branch_row.prompt_len == 2
+    assert branch_row.weight_versions == [5, 5]
+    assert branch_row.link_spans == [("sub1", 2, 1), ("sub2", 1, 1)]
+    assert [commitment.model_call_id for commitment in branch_row.extras_commitments] == ["sub1", "sub2"]
+    assert branch_row.finish_reason_resolved is True and branch_row.incomplete_reason is None
+
+
+def test_verify_and_linearize_all_without_branches_matches_verify_and_linearize() -> None:
+    receipt, snapshots = _branched()
+    assert verify_and_linearize_all(receipt, snapshots) == [verify_and_linearize(receipt, snapshots)]
+
+
+def test_a_branch_that_forks_from_the_terminal_root_is_rejected() -> None:
+    snapshots, manifest = _with_sub_agent()
+    receipt = _receipt_with_branches(manifest, terminal="main", branches=["sibling"])
+    with pytest.raises(ReceiptVerificationError, match="branch_shares_terminal_root"):
+        verify_and_linearize_all(receipt, snapshots)
+
+
+def test_a_branch_row_is_verified_like_the_terminal_row() -> None:
+    snapshots, manifest = _with_sub_agent()
+    # Break the sub-agent child's chain hash: the branch no longer extends its parent.
+    broken = _snapshot(
+        "sub2",
+        parent_call_id="sub1",
+        prev_len=3,
+        token_ids=[50, 51],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.6],
+        weight_version=5,
+        parent=snapshots[3],
+        chain_hash=compute_chain_hash(None, [50, 51]),
+    )
+    snapshots = snapshots[:4] + [broken]
+    manifest = [_manifest_row(snapshot) for snapshot in snapshots]
+    receipt = _receipt_with_branches(manifest, terminal="main", branches=["sub2"])
+    assert verify_and_linearize(receipt, snapshots).model_call_ids == ["root", "main"]
+    with pytest.raises(ReceiptVerificationError, match="chain_hash_mismatch"):
+        verify_and_linearize_all(receipt, snapshots)
+
+
+@pytest.mark.parametrize(
+    ("branches", "message"),
+    [
+        (["main"], "must not name the terminal call"),
+        (["ghost"], "absent from the receipt manifest"),
+        (["sub2", "sub2"], "contains duplicates"),
+    ],
+)
+def test_the_receipt_validates_its_branch_terminals(branches: list[str], message: str) -> None:
+    _, manifest = _with_sub_agent()
+    with pytest.raises(ValueError, match=message):
+        _receipt_with_branches(manifest, terminal="main", branches=branches)

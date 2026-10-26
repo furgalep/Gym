@@ -94,6 +94,11 @@ class LinearizedRow:
     # token-identical calls that recorded different finish reasons, so the reason reported here
     # depends on which of them the receipt names.
     finish_reason_resolved: bool = True
+    # Which chain this row linearizes: ``"terminal"`` for the receipt's terminal chain, or
+    # ``"branch"`` for a chain rooted at a call the terminal chain does not share, named by
+    # ``RolloutReceipt.branch_terminal_model_call_ids``. A branch row's ``model_call_ids[-1]``
+    # is that branch's terminal call.
+    chain: str = "terminal"
 
     @property
     def call_ids(self) -> list[str]:
@@ -259,13 +264,8 @@ def _validate_manifest_graph(records: dict[str, CallRecord]) -> None:
             cursor = records.get(cursor.parent_call_id) if cursor.parent_call_id is not None else None
 
 
-def _terminal_chain(
-    receipt: RolloutReceipt,
-    records: dict[str, CallRecord],
-) -> list[CallRecord]:
-    terminal = receipt.terminal_model_call_id
-    if terminal is None:
-        raise RebuildError("missing_terminal", "successful receipt has no terminal call")
+def _chain_to(terminal: str, records: dict[str, CallRecord]) -> list[CallRecord]:
+    """Return the root-to-``terminal`` ancestry; the manifest graph was validated acyclic."""
     chain: list[CallRecord] = []
     cursor = records.get(terminal)
     if cursor is None:
@@ -275,6 +275,16 @@ def _terminal_chain(
         cursor = records.get(cursor.parent_call_id) if cursor.parent_call_id is not None else None
     chain.reverse()
     return chain
+
+
+def _terminal_chain(
+    receipt: RolloutReceipt,
+    records: dict[str, CallRecord],
+) -> list[CallRecord]:
+    terminal = receipt.terminal_model_call_id
+    if terminal is None:
+        raise RebuildError("missing_terminal", "successful receipt has no terminal call")
+    return _chain_to(terminal, records)
 
 
 def _carry_boundary(snapshot: StagedCallBaseSnapshot) -> int:
@@ -296,16 +306,11 @@ def _carry_boundary(snapshot: StagedCallBaseSnapshot) -> int:
     return boundary
 
 
-def verify_and_linearize(
+def _verify_receipt(
     receipt: RolloutReceipt,
     snapshots: Sequence[StagedCallBaseSnapshot],
-) -> LinearizedRow:
-    """Verify an untrusted staged base set and linearize the declared terminal chain.
-
-    Metadata-only: extras payloads are never read. The returned row's
-    ``extras_commitments`` carry the selected calls' receipt-bound digests for
-    consumers to verify fetched extras against at their own point of use.
-    """
+) -> tuple[dict[str, CallRecord], dict[str, StagedCallBaseSnapshot]]:
+    """Verify every manifest row against its staged snapshot and return both by call id."""
     if not isinstance(receipt, RolloutReceipt):
         raise TypeError("receipt must be a RolloutReceipt")
     _verify_versions(receipt)
@@ -350,8 +355,18 @@ def verify_and_linearize(
         _compare_manifest_fields(receipt, record, snapshot)
         _recompute_integrity(snapshot)
     _validate_manifest_graph(records_by_id)
-    chain = _terminal_chain(receipt, records_by_id)
+    return records_by_id, snapshots_by_id
 
+
+def _linearize_chain(
+    receipt: RolloutReceipt,
+    chain: list[CallRecord],
+    snapshots_by_id: dict[str, StagedCallBaseSnapshot],
+    *,
+    chain_kind: str,
+    finish_reason_resolved: bool,
+) -> LinearizedRow:
+    """Linearize one verified root-to-terminal chain, checking each staged delta extends its parent."""
     token_ids: list[int] = []
     token_mask: list[float] = []
     logprobs: list[float] = []
@@ -420,8 +435,67 @@ def verify_and_linearize(
         link_spans=link_spans,
         extras_commitments=extras_commitments,
         terminal_finish_reason=chain[-1].finish_reason,
+        finish_reason_resolved=finish_reason_resolved,
+        chain=chain_kind,
+    )
+
+
+def verify_and_linearize(
+    receipt: RolloutReceipt,
+    snapshots: Sequence[StagedCallBaseSnapshot],
+) -> LinearizedRow:
+    """Verify an untrusted staged base set and linearize the declared terminal chain.
+
+    Metadata-only: extras payloads are never read. The returned row's
+    ``extras_commitments`` carry the selected calls' receipt-bound digests for
+    consumers to verify fetched extras against at their own point of use.
+    """
+    records_by_id, snapshots_by_id = _verify_receipt(receipt, snapshots)
+    return _linearize_chain(
+        receipt,
+        _terminal_chain(receipt, records_by_id),
+        snapshots_by_id,
+        chain_kind="terminal",
         finish_reason_resolved=FINISH_REASON_DISAGREEMENT_REASON not in _attribution_reasons(receipt),
     )
+
+
+def verify_and_linearize_all(
+    receipt: RolloutReceipt,
+    snapshots: Sequence[StagedCallBaseSnapshot],
+) -> list[LinearizedRow]:
+    """Verify the staged base set and linearize the terminal chain and each branch chain.
+
+    The terminal row comes first and equals what ``verify_and_linearize`` returns. One more
+    row follows per ``receipt.branch_terminal_model_call_ids`` entry, in order, each the
+    root-to-terminal chain of a call the terminal chain does not share. A branch whose root is
+    the terminal chain's own root is rejected: its output left the scored path, and a framework
+    that wants it is not training on what the verifier saw. A branch terminal is chosen by its
+    subtree's structure rather than among identical retries, so its finish reason is its own.
+    """
+    records_by_id, snapshots_by_id = _verify_receipt(receipt, snapshots)
+    terminal_chain = _terminal_chain(receipt, records_by_id)
+    rows = [
+        _linearize_chain(
+            receipt,
+            terminal_chain,
+            snapshots_by_id,
+            chain_kind="terminal",
+            finish_reason_resolved=FINISH_REASON_DISAGREEMENT_REASON not in _attribution_reasons(receipt),
+        )
+    ]
+    terminal_root = terminal_chain[0].model_call_id
+    for branch_terminal in receipt.branch_terminal_model_call_ids:
+        chain = _chain_to(branch_terminal, records_by_id)
+        if chain[0].model_call_id == terminal_root:
+            raise RebuildError(
+                "branch_shares_terminal_root",
+                f"branch terminal {branch_terminal} forks from the terminal chain's root {terminal_root}",
+            )
+        rows.append(
+            _linearize_chain(receipt, chain, snapshots_by_id, chain_kind="branch", finish_reason_resolved=True)
+        )
+    return rows
 
 
 def linearize(

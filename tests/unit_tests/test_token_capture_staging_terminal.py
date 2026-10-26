@@ -6,8 +6,15 @@
 from __future__ import annotations
 
 from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.token_id_capture.staging.records import TERMINAL_AMBIGUOUS as AMBIGUOUS_TERMINAL
+from nemo_gym.token_id_capture.staging.records import TERMINAL_ORPHANED_ROW as ORPHANED_ROW
 from nemo_gym.token_id_capture.staging.records import CallRecord
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.token_id_capture.staging.terminal import (
+    BranchSelection,
+    TerminalSelection,
+    select_branch_terminals,
+    select_terminal_call,
+)
 
 
 DIGEST = "b" * 64
@@ -146,3 +153,38 @@ def test_cyclic_rows_select_nothing():
 def test_duplicate_call_ids_select_nothing():
     rows = _chain("c1", "c2") + _chain("c1", start_at=300.0)
     assert select_terminal_call(rows) == TerminalSelection(None, "duplicate_call_id")
+
+
+# --- select_branch_terminals ------------------------------------------------------
+
+
+def test_branch_terminals_name_the_leaf_of_each_root_beside_the_terminal_chain():
+    rows = _chain("root", "main") + _chain("sub1", "sub2", "sub3", start_at=200.0) + _chain("aux", start_at=50.0)
+    selection = select_branch_terminals(rows, "main")
+    # Roots are visited in admission order; the terminal chain's own root is not a branch.
+    assert selection.terminal_model_call_ids == ["aux", "sub3"]
+    assert selection.excluded == {}
+
+
+def test_a_fork_off_the_terminal_root_is_not_a_branch():
+    rows = _chain("root", "main") + [_row("fork", parent_call_id="root", prev_len=10, admitted_at=101.5)]
+    selection = select_branch_terminals(rows, "main")
+    assert selection.terminal_model_call_ids == [] and selection.excluded == {}
+
+
+def test_an_abandoned_retry_inside_a_branch_is_eliminated_but_a_final_retry_is_ambiguous():
+    rows = _chain("root", "main") + _chain("sub1", "sub2", "sub3", start_at=200.0)
+    rows.append(_row("sub2-retry", parent_call_id="sub1", prev_len=10, admitted_at=201.5))
+    assert select_branch_terminals(rows, "main").terminal_model_call_ids == ["sub3"]
+
+    rows.append(_row("sub3-retry", parent_call_id="sub2", prev_len=20, admitted_at=202.5))
+    selection = select_branch_terminals(rows, "main")
+    assert selection.terminal_model_call_ids == []
+    assert selection.excluded == {AMBIGUOUS_TERMINAL: 1}
+
+
+def test_branch_selection_fails_closed_on_a_malformed_manifest():
+    rows = _chain("root", "main") + [_row("orphan", parent_call_id="ghost", prev_len=10)]
+    assert select_branch_terminals(rows, "main") == BranchSelection([], {ORPHANED_ROW: 1})
+    assert select_branch_terminals(_chain("root", "main"), "ghost") == BranchSelection([], {"missing_terminal": 1})
+    assert select_branch_terminals([], "main") == BranchSelection([], {"missing_terminal": 1})

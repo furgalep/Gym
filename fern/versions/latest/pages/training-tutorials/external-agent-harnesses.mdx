@@ -251,6 +251,7 @@ Gym adds capture metrics under `_ng_token_capture` on each rebuilt rollout.
 | `empty_generation_calls` | `0` | A model call produced no trainable generated tokens. |
 | `unresolved_parent_calls` | `0` | A continuation could not be linked to exactly one verified earlier call. |
 | `mask_sample` | Absent or `false` | The rollout is incomplete or ambiguous and must not contribute to the loss. |
+| `branch_chains.by_relation` | Empty for a simple rollout | `independent_root` counts chains rooted at a call the main chain does not share, such as a sub-agent's. `fork` counts continuations of the main chain's root that left the kept path. See [Train on sub-agent chains](#train-on-sub-agent-chains). |
 
 Terminal attribution is how Gym finds the captured call that produced the response the verifier scored. When attribution succeeds, `terminal_attribution.chain` is `delivered`, and Gym trains on that call's chain even if the harness also made side calls. When Gym cannot identify the final call, `terminal_attribution.chain` is empty and `terminal_attribution.method` is `none`. This is not an error by itself. Gym then keeps the rollout only if the capture contains exactly one chain with no unresolved calls, so `chains` greater than 1 masks an unattributed rollout.
 
@@ -274,11 +275,34 @@ Stock vLLM does not implement this prefix-supply extension. Leave the overlay di
 
 Prefix supply is not supported with `use_completions_api: true` or `is_responses_native: true`.
 
+## Train on sub-agent chains
+
+A harness that spawns sub-agents makes model calls on more than one chain. A sub-agent's first prompt carries no model-authored history, so the model server admits it as a root of its own, and its tokens never extend the main agent's. `response.output` carries one chain, the one terminal attribution joined to the verifier-scored response, so by default a sub-agent's tokens are captured, counted under `branch_chains`, and not trained on.
+
+To also deliver them, set:
+
+```yaml
+token_id_capture:
+  deliver_branch_chains: true
+```
+
+Each rebuilt, unmasked rollout then carries `_ng_token_capture_branches`: a list of Responses objects, one per deliverable branch chain, shaped like the rebuilt `response` with the same contiguous `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs` fields on its generated items. Each carries `_ng_chain` naming the chain and its root and terminal calls. `response.output` is unchanged, so a trainer that reads one sequence per rollout is unaffected; a trainer that accepts several related sequences reads the branches too and decides how the rollout's reward applies to them.
+
+Gym delivers a branch chain only when:
+
+- terminal attribution delivered the main chain, so the branch is known to be beside the scored path rather than a candidate for it;
+- the branch is rooted at a call the main chain does not share (`independent_root`). A `fork` continues the main chain's root and left the kept path, so its output did not reach the verifier and it is withheld;
+- no call on it was kept over a retry twin by call-id order alone (`retry_ambiguous`), and its root is not a fragment after an unproven parent boundary (`unresolved_root`).
+
+`_ng_token_capture.branch_chains` reports the result: `by_relation` counts the chains beside the main one, `excluded` counts the withheld branches by reason, `generated_tokens` is the deliverable branches' sampled-token count, and `delivered` is how many branch responses this record carries. A masked rollout delivers no branches.
+
+Branches never change `delivered_fraction`, which keeps describing `response.output` alone. The fraction of a sub-agent harness's sampled tokens the trainer sees is `(generated_tokens_delivered + branch_chains.generated_tokens) / generated_tokens_captured`.
+
 ## Current limitations
 
-- Gym delivers one verified model-call chain per rollout. When Gym can attribute the verifier-scored response to a captured terminal call, it delivers that call's intact ancestor chain and excludes unrelated calls. Without terminal attribution, multiple plausible chains cause masking.
-- Harness-generated title, compaction, retry, or sub-agent calls can appear as additional chains. Inspect `terminal_attribution`, `chains`, and `delivered_fraction` to confirm that Gym selected the intended chain.
-- Full-tree training requires a trainer data contract that accepts multiple related trajectories.
+- `response.output` carries one verified model-call chain per rollout. When Gym can attribute the verifier-scored response to a captured terminal call, it delivers that call's intact ancestor chain and excludes unrelated calls. Without terminal attribution, multiple plausible chains cause masking.
+- Harness-generated title, compaction, retry, or sub-agent calls can appear as additional chains. Inspect `terminal_attribution`, `chains`, `delivered_fraction`, and `branch_chains` to confirm that Gym selected the intended chain. Sub-agent chains are delivered beside it only with `deliver_branch_chains`, and only chains rooted apart from the main chain qualify; a continuation of the main chain's root that the harness abandoned is never delivered.
+- A branch chain carries no reward of its own. The trainer decides how the rollout's reward applies to the sub-agent sequences, for example by sharing the rollout's advantage; Gym records which calls each chain covers and nothing more.
 - Prefix supply requires a compatible inference backend and is not available in stock vLLM.
 
 ## Advanced framework integration
@@ -352,6 +376,8 @@ async def deliver_rollout(
 ```
 
 Exclude any result with `mask_sample: true` from the loss. Call `retire_rollout_token_capture` only after durable downstream storage has accepted the rebuilt result. If the framework retires the records first and the write then fails, the captured token ids are lost.
+
+Pass `deliver_branch_chains=True` to `finalize_rollout_token_capture` to receive sub-agent chains under `result["_ng_token_capture_branches"]` as described in [Train on sub-agent chains](#train-on-sub-agent-chains). A framework that stages tokens itself and rebuilds from a `RolloutReceipt` instead gets the same chains from the ledger manifest: `select_branch_terminals(records, terminal_model_call_id)` names the terminal call of each branch chain, the receipt carries them as `branch_terminal_model_call_ids`, and `verify_and_linearize_all(receipt, snapshots)` returns the terminal row followed by one verified `LinearizedRow` per branch, each tagged by its `chain` field. `verify_and_linearize` keeps returning the terminal row alone.
 
 `retire_rollout_token_capture` only removes rollouts that were delivered, so it keeps masked and failed captures around for inspection and never sees an attempt you abandoned. To remove those captures, use the source's two batched operations, which match the ones the external-staging capture ledger provides.
 

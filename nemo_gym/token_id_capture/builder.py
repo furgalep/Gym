@@ -59,6 +59,26 @@ class Chain:
     chain_id: str
     links: list[ChainLink] = field(default_factory=list)
     root_prompt: list[int] = field(default_factory=list)
+    # Where this chain sits relative to the main chain:
+    #   "main"              the chain selected for ``response.output``
+    #   "independent_root"  begins at a root the main chain does not share: a sub-agent or an
+    #                       auxiliary call whose first prompt carries no model-authored history
+    #   "fork"              shares the main chain's root and leaves its path: an abandoned
+    #                       continuation whose output the harness did not keep
+    relation: str = ""
+    # Why a branch chain is withheld from delivery; "" means it is deliverable.
+    #   "fork"             its output did not reach the verifier through the kept path
+    #   "retry_ambiguous"  a call on it was kept over a retry twin by call-id order alone
+    #   "unresolved_root"  it begins at a fragment after an unproven parent boundary
+    exclusion: str = ""
+
+    @property
+    def root_call_id(self) -> str:
+        return self.links[0].entry.model_call_id if self.links else ""
+
+    @property
+    def terminal_call_id(self) -> str:
+        return self.links[-1].entry.model_call_id if self.links else ""
 
     def validate(self) -> None:
         """Require one log probability for each generated token.
@@ -88,10 +108,15 @@ class BuildNotes:
     chains: int = 0
     generated_tokens_captured: int = 0
     generated_tokens_delivered: int = 0
-    # Only one chain is delivered per rollout.
-    # Sub-agent branches and post-compaction chains are dropped.
-    # The delivered fraction exposes this limitation.
+    # ``response.output`` carries one chain per rollout.
+    # The delivered fraction counts only that chain's tokens; branch chains are reported below.
     delivered_fraction: float = 0.0
+    # Chains other than the main one, counted by ``Chain.relation``.
+    branch_chains: dict[str, int] = field(default_factory=dict)
+    # Branch chains withheld from delivery, counted by ``Chain.exclusion``.
+    branches_excluded: dict[str, int] = field(default_factory=dict)
+    # Generated tokens on deliverable branch chains.
+    branch_generated_tokens: int = 0
     # These calls have a retry sibling that the harness may not have kept.
     # A final-call retry is unresolved because no later call identifies the survivor.
     unresolved_retries: list[str] = field(default_factory=list)
@@ -126,6 +151,8 @@ class _Node:
     children: list["_Node"] = field(default_factory=list)
     quarantined: bool = False
     unresolved_boundary: bool = False
+    # Kept over a retry twin by call-id order alone: the harness's choice is unknown.
+    retry_ambiguous: bool = False
 
 
 @dataclass
@@ -421,7 +448,10 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
                 if extended:
                     keep = set(extended)
                 else:
-                    keep = {min(retry_group, key=lambda n: n.entry.model_call_id)}
+                    kept = min(retry_group, key=lambda n: n.entry.model_call_id)
+                    keep = {kept}
+                    # The harness's choice is unknown; a branch through this call is not delivered.
+                    kept.retry_ambiguous = True
                     # With an attributed terminal, a group off the terminal path
                     # cannot reach the delivered chain, so it never masks.
                     if terminal_node is None:
@@ -514,14 +544,36 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         root = c.links[0].entry
         return (root.created_at, root.model_call_id)
 
+    # Every other chain is a branch. Its relation to the main chain and the reason it is
+    # withheld from delivery, if any, let the consumer offer a sub-agent's chain to a trainer
+    # whose data contract accepts more than one sequence per rollout.
+    branch_chains: dict[str, int] = {}
+    branches_excluded: dict[str, int] = {}
+    branch_generated_tokens = 0
     if chains:
         main = terminal_chain if terminal_chain is not None else min(chains, key=selection_key)
         main.chain_id = "main"
+        main.relation = "main"
+        main_root = main.root_call_id
         branch = 0
         for c in chains:
-            if c is not main:
-                c.chain_id = f"branch-{branch}"
-                branch += 1
+            if c is main:
+                continue
+            c.chain_id = f"branch-{branch}"
+            branch += 1
+            c.relation = "fork" if c.root_call_id == main_root else "independent_root"
+            branch_chains[c.relation] = branch_chains.get(c.relation, 0) + 1
+            root_node = nodes_by_call_id[c.root_call_id]
+            if c.relation == "fork":
+                c.exclusion = "fork"
+            elif root_node.unresolved_boundary:
+                c.exclusion = "unresolved_root"
+            elif any(nodes_by_call_id[link.entry.model_call_id].retry_ambiguous for link in c.links):
+                c.exclusion = "retry_ambiguous"
+            if c.exclusion:
+                branches_excluded[c.exclusion] = branches_excluded.get(c.exclusion, 0) + 1
+            else:
+                branch_generated_tokens += sum(len(link.entry.generation_token_ids) for link in c.links)
 
     delivered = sum(len(link.entry.generation_token_ids) for link in main.links) if chains else 0
     captured = sum(len(e.generation_token_ids) for e in entries)
@@ -532,6 +584,9 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         generated_tokens_captured=captured,
         generated_tokens_delivered=delivered,
         delivered_fraction=round(delivered / captured, 4) if captured else 0.0,
+        branch_chains=branch_chains,
+        branches_excluded=branches_excluded,
+        branch_generated_tokens=branch_generated_tokens,
         unresolved_retries=unresolved_retries,
         empty_generation_calls=empty_generation,
         terminal_call_id=terminal_call_id,
@@ -663,6 +718,52 @@ def project_main_chain_response(
         response["status"] = "incomplete"
         response["incomplete_details"] = {"reason": incomplete_reason}
     return response
+
+
+def project_branch_chain_responses(rollout_id: str, out: BuildOutput, model: str = "") -> list[dict]:
+    """Rebuild each deliverable branch chain as its own Responses object.
+
+    A branch chain begins at a root the main chain does not share, for example a sub-agent's
+    first call, and its tokens never extend the main chain's. Each projected payload has the
+    shape ``project_main_chain_response`` gives the main chain, so a trainer that accepts more
+    than one sequence per rollout reads it the same way, and carries ``_ng_chain`` naming the
+    chain and its root and terminal calls.
+
+    Branch chains withheld by ``Chain.exclusion`` are not projected. Their truncation verdict is
+    their own terminal call's finish reason: a branch terminal is never chosen among identical
+    retries, because such a branch is withheld as ``retry_ambiguous``.
+    """
+    responses: list[dict] = []
+    for chain in out.chains:
+        if chain.relation == "main" or chain.exclusion or not chain.links:
+            continue
+        output = project_chain_to_output_items(chain)
+        generated = [item for item in output if item.get("generation_token_ids") is not None]
+        if not any(item["generation_token_ids"] for item in generated):
+            continue
+        response = {
+            "id": f"proj-{rollout_id}-{chain.chain_id}",
+            "model": model,
+            "object": "response",
+            "output": output,
+            "usage": {
+                "input_tokens": len(generated[0]["prompt_token_ids"]),
+                "output_tokens": sum(len(item["generation_token_ids"]) for item in generated),
+            },
+            "_ng_chain": {
+                "chain_id": chain.chain_id,
+                "relation": chain.relation,
+                "root_call_id": chain.root_call_id,
+                "terminal_call_id": chain.terminal_call_id,
+                "n_calls": len(chain.links),
+            },
+        }
+        incomplete_reason = incomplete_reason_for_finish_reason(chain.links[-1].entry.finish_reason)
+        if incomplete_reason is not None:
+            response["status"] = "incomplete"
+            response["incomplete_details"] = {"reason": incomplete_reason}
+        responses.append(response)
+    return responses
 
 
 def assert_prefix_contiguity(response: dict) -> None:

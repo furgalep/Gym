@@ -494,6 +494,11 @@ class RolloutReceipt(_DigestWireModel):
     # The witness abstention/corroboration trail from attribution, kept on
     # success and failure alike so per-method metrics stay diagnosable.
     terminal_attribution_reason: str | None = None
+    # Terminal calls of branch chains the framework also trains on: each is the leaf of a chain
+    # rooted at a call the terminal chain does not share, such as a sub-agent's calls
+    # (``select_branch_terminals``). ``verify_and_linearize_all`` linearizes one row per entry
+    # after the terminal row. Empty when the framework trains on the terminal chain alone.
+    branch_terminal_model_call_ids: list[Identifier] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_manifest(self) -> Self:
@@ -502,6 +507,13 @@ class RolloutReceipt(_DigestWireModel):
             raise ValueError("receipt manifest contains duplicate model_call_id values")
         if self.terminal_model_call_id is not None and self.terminal_model_call_id not in set(model_call_ids):
             raise ValueError("terminal_model_call_id is absent from the receipt manifest")
+        branches = self.branch_terminal_model_call_ids
+        if len(branches) != len(set(branches)):
+            raise ValueError("branch_terminal_model_call_ids contains duplicates")
+        if any(call_id not in set(model_call_ids) for call_id in branches):
+            raise ValueError("a branch_terminal_model_call_id is absent from the receipt manifest")
+        if self.terminal_model_call_id in branches:
+            raise ValueError("branch_terminal_model_call_ids must not name the terminal call")
         return self
 
     @model_validator(mode="after")
