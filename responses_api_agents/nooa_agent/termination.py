@@ -7,7 +7,7 @@ from enum import StrEnum
 from types import FrameType
 
 from aiohttp import ClientResponseError
-from nooa.errors import GenerationError, LoopDetectedError
+from nooa.errors import GenerationError, IterationLimitExceeded, LoopDetectedError
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 
@@ -95,6 +95,9 @@ def policy_termination(
             return NOOATerminationReason.POLICY_BUDGET_EXCEEDED, str(error)
         if isinstance(error, InvalidPolicyOutputError):
             return NOOATerminationReason.INVALID_POLICY_OUTPUT, str(error)
+        if isinstance(error, IterationLimitExceeded):
+            # NOOA names this stop since 0f89a91f; the frame inspection below serves older pins.
+            return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)
         if _is_codeact_iteration_exhaustion(error):
             return NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, str(error)
         if _is_codeact_loop_stop(error):
