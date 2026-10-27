@@ -8,12 +8,33 @@ nooa_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      nooa:
-        agent_class: nooa_bench.bench_agent:BenchAgent
-        invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
-        init_kwargs: {}
-        execution_mode: embedded
+      # Any NOOA agent: module:Class, constructed with llm= and agent_kwargs, then
+      # `await agent.<turn_method>(task_text)` inside the task sandbox.
+      agent: nooa_bench.gym:ShellAgent
+      turn_method: solve
+      agent_kwargs: {}
+      # module:callable(agent, tools) replacing the default translation of Gym tools into the
+      # NOOA interface (a Skill of callables on the agent plus function tools). null = default.
+      tool_binding: null
+      # NOOA's own exports written in the sandbox: atif, trace_jsonl. Collected into
+      # artifacts_output/<rollout_id>.tar.gz after each episode when both are set.
+      artifacts: []
+      artifacts_output: null
+      context_window: null        # policy context window for NOOA's budgeting
+      replay_reasoning: false     # replay prior reasoning items to the policy (model-family dependent)
+      media_inputs: []            # what the policy accepts: image, audio, video, pdf; empty = text-only
+      # Prebuilt NOOA runtime archives (see runtime.py build). Defaults come from the
+      # NOOA_GYM_RUNTIME_TARBALL and NOOA_GYM_RUNTIME_TARBALL_MUSL environment variables;
+      # staging probes the image's libc and picks the matching one.
+      runtime_tarball: null
+      runtime_tarball_musl: null
+      runtime_python: null        # interpreter with NOOA already in the sandbox (local provider only)
+      timeout: 900                # agent time budget ceiling; task metadata can shorten it
+      close_timeout: 30
       max_policy_calls: null
+      shell_timeout_seconds: 180
+      sandbox_provider: null      # only when the agent owns its sandbox (no sandbox_access grant)
+      sandbox_config: {}
 
 # Recipes bind Resources and rename this instance through _inherit_from.
 nooa_environment_server:

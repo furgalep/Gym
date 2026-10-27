@@ -108,6 +108,9 @@ def _config(
             sandbox_mode="danger-full-access",
             extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
         )
+    if harness == "nooa":
+        # The local sandbox is this machine: the worker runs on the interpreter that has NOOA installed.
+        agent.update(runtime_python=sys.executable, timeout=timeout)
     if harness == "hermes":
         agent.update(
             max_turns=6,
