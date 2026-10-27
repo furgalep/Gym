@@ -419,29 +419,6 @@ async def test_cleanup_failure_does_not_discard_healthy_runtime(
     portable_download.assert_not_awaited()
 
 
-def test_runtime_entrypoint_import_does_not_load_controller_dependencies() -> None:
-    import subprocess
-    import sys
-
-    # A fresh interpreter catches imports hidden by a test process's module cache.
-    script = """
-import importlib.abc
-import sys
-class RejectControllerDependencies(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'ray', 'datasets', 'pyarrow', 'pandas', 'mlflow'}:
-            raise RuntimeError('task runtime imported controller dependency: ' + fullname)
-sys.meta_path.insert(0, RejectControllerDependencies())
-from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxInput
-from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.task_agent import TaskAgent
-config = NOOAInvocationConfig(agent_class='responses_api_agents.nooa_agent.task_agent:TaskAgent',
-    invocation_adapter='responses_api_agents.nooa_agent.task_agent:invoke_solve_task')
-assert validate_invocation(config)[0] is TaskAgent
-"""
-    subprocess.run([sys.executable, "-c", script], cwd=Path(sandbox_runtime.__file__).resolve().parents[2], check=True)
-
-
 @pytest.fixture
 def wheelhouse(tmp_path: Path, runtime_package: tuple[bytes, str], portable_download: AsyncMock) -> Path:
     path = tmp_path / "wheelhouse"

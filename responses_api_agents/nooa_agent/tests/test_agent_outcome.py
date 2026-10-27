@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
-from pydantic import ValidationError
 
 from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
@@ -23,14 +22,12 @@ from nemo_gym.rollout_collection import (
     failures_path_for,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_app import agent, close, open_session, result
 from responses_api_agents.nooa_agent.tests.test_config import agent_config, invocation_config
 from responses_api_agents.nooa_agent.tests.test_environment import _environment, _paths, _request
 from responses_api_agents.nooa_agent.tests.test_runner import model_http_error
-from responses_api_agents.nooa_agent.tests.test_sandbox_entrypoint import payload
 
 
 def rejection_agent(status: int) -> NOOAAgent:
@@ -114,58 +111,6 @@ async def test_rejection_policy_respects_collector_attempt_cap(
     pending, *_ = RolloutCollectionHelper()._load_from_cache(config)
 
     assert pending == ([{**key, ATTEMPT_INDEX_KEY_NAME: 1}] if action == "retry" and prior_attempts == 1 else [])
-
-
-@pytest.mark.parametrize("status", [400, 413, 422])
-async def test_worker_result_and_checkpoint_preserve_model_status(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
-) -> None:
-    instance = rejection_agent(status)
-    p = payload()
-    p.invocation = instance.config.nooa
-    monkeypatch.setattr(entrypoint, "_ModelClient", MagicMock(return_value=instance.server_client))
-
-    artifact = await entrypoint.execute(p)
-    path = tmp_path / "result.json"
-    entrypoint._write_json(path, artifact)
-    restored = entrypoint.SandboxResult.model_validate_json(path.read_text()).run_result()
-
-    assert artifact.error is None
-    assert artifact.response.status == "failed"
-    assert artifact.model_status_code == restored.model_status_code == status
-    assert restored.termination_reason is NOOATerminationReason.MODEL_REJECTED
-    assert restored.termination_error == artifact.response.error.message
-    assert restored.model_cookies == p.request.model_cookies
-    assert restored.resource_cookies == p.request.resource_cookies
-    assert restored.episode.observations == artifact.observations
-    assert restored.trajectory == artifact.trajectory
-    checkpoint_path = tmp_path / "checkpoint.json"
-    entrypoint.write_checkpoint(checkpoint_path, restored)
-    checkpoint = entrypoint.SandboxCheckpoint.model_validate_json(checkpoint_path.read_text())
-    assert checkpoint.model_status_code == checkpoint.run_result().model_status_code == status
-    assert checkpoint.partial is True
-    assert checkpoint.response.status == "incomplete"
-    assert checkpoint.termination_reason is None
-    assert "partial_checkpoint" in {gap.code for gap in checkpoint.observations.gaps}
-
-    # The controller must classify the restored structured status, not parse diagnostic text.
-    instance, run = agent(monkeypatch)
-    run.return_value = restored
-    request = await open_session(instance)
-    response = await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
-        "failure_kind": "model_request_error",
-        "status_code": status,
-    }
-    await close(instance)
-
-
-@pytest.mark.parametrize("invalid", [True, "400", 399, 600])
-def test_worker_rejects_invalid_structured_model_status(invalid: object) -> None:
-    with pytest.raises(ValidationError, match="model_status_code"):
-        entrypoint.SandboxResult(
-            observations={"source": "nooa"}, model_cookies={}, resource_cookies={}, model_status_code=invalid
-        )
 
 
 async def test_reported_rejection_preserves_other_response_metadata(monkeypatch: pytest.MonkeyPatch) -> None:

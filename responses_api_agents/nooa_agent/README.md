@@ -31,8 +31,18 @@ the outer `execute_python` call from nested resource calls.
 
 ## Sandboxed execution
 
-`nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.
-NOOA stages its own runtime and closes its worker before disconnecting; Resources owns sandbox creation and teardown.
+`nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources, as
+`python -I -m nooa_bench.gym_worker` on the staged NOOA runtime under Gym's process supervisor. The worker is
+NOOA's own in-sandbox episode runner: this server writes a JSON payload (task text, `nooa.agent_class`,
+`nooa.turn_method`, `nooa.init_kwargs`, the Gym tools and their grant, the rollout-prefixed model URL) and reads
+back an `Episode` (`worker.py`), so the sandbox side never needs Gym code and any NOOA agent class can run.
+The worker's model calls go straight to Gym's model server, which holds the authoritative capture; the response
+output holds only the policy's own items and `metadata.terminal_response_id` names the root agent's last
+completed response for token-id attribution. Gym tools reach the agent through
+`nooa_bench.gym.bind_gym_tools` (a Skill of documented callables on `self.gym` plus function tools), or through
+the `nooa.tool_binding` callable a harness names. `runtime_python` points at an interpreter that already has
+NOOA inside the sandbox and skips runtime preparation (local providers, conformance). Resources owns sandbox
+creation and teardown.
 Agent and resource sessions use Gym's existing `single_agent_turn` environment. Agent close returns the evidence and final
 Resources cookies before verification; Resources closes its sandbox afterward.
 
@@ -60,8 +70,9 @@ interrupted by session close returns HTTP 409 to a caller whose request was not 
 
 ## Sandbox worker supervision
 
-`sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. Exhausting that
-budget is an ungradable, non-retryable execution failure, rather than a retryable model or provider outage.
-Partial checkpoints remain available for failure inspection; they never authorize grading. Transient artifact
-transfer failures receive one retry within the existing capture deadline. Worker startup and supervisor failures
-retain up to 2,000 characters of output-log diagnostics after artifact capture.
+`sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. At the budget
+the supervisor sends SIGTERM and waits a short grace before SIGKILL; the worker uses that window to stop the agent
+and write the episode it has with stop reason `timeout_exceeded`. Gym grades that checkpoint as `incomplete`
+(the sandbox state is what the verifier sees), but only when the supervisor's receipt vouches for the stop: a
+`timeout_exceeded` result without a timed-out receipt, or a worker that left no result, is an infrastructure
+failure (HTTP 504 at the budget, otherwise an error with the output-log tail), never a retryable model outage.

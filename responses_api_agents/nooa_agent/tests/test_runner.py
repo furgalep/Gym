@@ -35,7 +35,6 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunFailure,
     NOOARunRequest,
 )
-from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, write_checkpoint
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 from responses_api_agents.nooa_agent.tests.test_resource_tools import FakeResponse as FakeResourceResponse
@@ -395,97 +394,6 @@ async def test_cancellation_preserves_evidence_without_swallowing_cancellation()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         WaitingAgent.ready = None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [200])
-async def test_real_code_and_resource_outputs_join_to_their_own_invocations(status: int, tmp_path) -> None:
-    runner, _ = policy_runner(ResourceUsingAgent)
-    checkpoints = []
-
-    def checkpoint(result):
-        assert result.return_value is None
-        write_checkpoint(tmp_path / "checkpoint.json", result)
-        checkpoints.append(SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text()))
-
-    runner._on_progress = checkpoint
-    model_requests = []
-    code_arguments = json.dumps({"code": "print(await self.get_weather(city='Paris'))"})
-
-    async def post(*, server_name: str, json: Any, **kwargs: Any) -> FakeHTTPResponse:
-        if server_name == "resources":
-            response = FakeHTTPResponse({"weather": "cold"} if status == 200 else {"error": "unavailable"})
-            response.status = status
-            return response
-        model_requests.append(json)
-        first = len(model_requests) == 1
-        output = NeMoGymResponseFunctionToolCall(
-            id=f"fc-{len(model_requests)}",
-            call_id=f"call-{len(model_requests)}",
-            name="execute_python" if first else "return_result",
-            arguments=code_arguments if first else '{"result":"done"}',
-        )
-        return FakeHTTPResponse(model_response(output, response_id=f"response-{len(model_requests)}"))
-
-    runner._server_client.post = AsyncMock(side_effect=post)
-
-    async def resource_request(method: str, url: str, **kwargs: Any) -> FakeHTTPResponse:
-        return await post(server_name="resources", **kwargs)
-
-    resource_tools.request.side_effect = resource_request
-    result = await runner.run(
-        NOOARunRequest(
-            tool_access=grant(),
-            responses_create_params=responses_create_params("Paris"),
-            model_url_path="/v1/responses",
-        )
-    )
-    assert result.return_value == "done"
-    # The NOOA code prefill, model response, resource completion within live
-    # code, code completion, final model response, and return_result completion.
-    assert [len(item.trajectory.turns) for item in checkpoints] == [0, 1, 1, 1, 2, 2]
-    assert len(checkpoints[0].trajectory.tool_calls) > 0
-    pending_code = next(tool for tool in checkpoints[2].trajectory.tool_calls if tool.tool_call_id == "call-1")
-    assert pending_code.tool_name == "execute_python"
-    assert pending_code.status == "incomplete"
-    assert pending_code.output is None
-    assert not any(
-        item.type == "function_call_output" and item.call_id == pending_code.tool_call_id
-        for item in checkpoints[2].response.output
-    )
-    completed_code = next(tool for tool in checkpoints[3].trajectory.tool_calls if tool.tool_call_id == "call-1")
-    assert completed_code.status == "completed"
-    assert all(item.partial and item.response.status == "incomplete" for item in checkpoints)
-    assert len(model_requests) == 2
-    code = next(tool for tool in result.trajectory.tool_calls if tool.tool_call_id == "call-1")
-    resource = next(tool for tool in result.trajectory.tool_calls if tool.tool_name == "get_weather")
-    assert code.tool_call_id == "call-1"
-    assert resource.status == ("completed" if status == 200 else "failed")
-    observed = next(
-        item.output
-        for item in model_requests[1].input
-        if item.type == "function_call_output" and item.call_id == "call-1"
-    )
-    assert observed == "status: accepted"
-    assert "PythonOutput(" in code.output and "cold" in code.output
-    assert any(
-        getattr(item, "role", None) == "user" and getattr(item, "content", None) == code.output
-        for item in model_requests[1].input
-    )
-    assert json.loads(resource.output) == ({"weather": "cold"} if status == 200 else {"error": "unavailable"})
-    assert all(tool.tool_name != "return_result" for tool in result.trajectory.tool_calls)
-    model_owner = next(inv for inv in result.trajectory.invocations if inv.invocation_id == code.invocation_id)
-    assert model_owner.conversation[0].role == "system"
-    for tool in (code, resource):
-        owner = next(
-            invocation
-            for invocation in result.trajectory.invocations
-            if invocation.invocation_id == tool.invocation_id
-        )
-        assert any(
-            getattr(item, "call_id", None) == tool.tool_call_id and item.type == "function_call_output"
-            for item in owner.conversation
-        )
 
 
 @pytest.mark.asyncio

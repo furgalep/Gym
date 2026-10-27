@@ -43,10 +43,8 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
             adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
             runtime.update(
                 requirements_sha256=digest_file(adapter / "requirements.txt"),
-                bootstrap_sha256=digest_file(adapter / "sandbox_runtime.py"),
-                sandbox_ownership="resources",
                 execution_mode="sandboxed",
-                observer_sha256=digest_file(Path(__file__).with_name("nooa_observer.py")),
+                worker="nooa_bench.gym_worker",
             )
         return runtime
     if harness == "hermes":
@@ -100,16 +98,20 @@ def _config(
     if harness == "nooa":
         agent.pop("model")
         agent.pop("concurrency")
-        from .nooa import observer_module_name
-
+        # The worker runs in the probe's local sandbox on this interpreter, which has NOOA installed. The
+        # probe scripts function tool calls and expects their outputs as function_call_output items, so the
+        # reference tool-calling agent (one shell tool, a tool-call loop) stands in for the CodeAct default.
         agent.update(
             nooa={
                 **defaults["nooa"],
                 "execution_mode": "sandboxed",
-                "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
-            }
+                "agent_class": "nooa_bench.gym:ShellAgent",
+                "turn_method": "solve",
+                "init_kwargs": {},
+            },
+            runtime_python=sys.executable,
+            sandbox_runner_timeout_seconds=timeout,
         )
-        agent["sandbox_runner_timeout_seconds"] = timeout
     if use_agent_sessions and harness != "nooa":
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
@@ -186,6 +188,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
     if harness == "nooa":
+        # Resources owns the task sandbox in production; the adapter borrows it.
         from .nooa import BorrowedSandboxProbe
 
         probe = BorrowedSandboxProbe(scenario, directory)

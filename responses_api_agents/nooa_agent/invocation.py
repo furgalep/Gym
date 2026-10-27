@@ -38,7 +38,13 @@ class NOOAInvocationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_class: str
-    invocation_adapter: str
+    # Sandboxed execution awaits ``agent.<turn_method>(task_text)`` inside the task sandbox.
+    turn_method: str = "solve"
+    # ``module:callable(agent, tools)`` replacing the worker's default translation of Gym tools into
+    # the NOOA interface (a Skill of callables on the agent plus function tools).
+    tool_binding: str | None = None
+    # Embedded execution only: an async ``module:function(agent, request)`` run in this server.
+    invocation_adapter: str | None = None
     execution_mode: Literal["embedded", "sandboxed"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
 
@@ -54,9 +60,11 @@ class NOOAInvocationConfig(BaseModel):
             raise ValueError("agent_class must use the format 'module.path:ClassName'")
         return value
 
-    @field_validator("invocation_adapter")
+    @field_validator("invocation_adapter", "tool_binding")
     @classmethod
-    def validate_invocation_adapter_path(cls, value: str) -> str:
+    def validate_invocation_adapter_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         parts = value.split(":")
         if len(parts) != 2:
             raise ValueError("invocation_adapter must use the format 'module.path:function_name'")
@@ -117,8 +125,10 @@ def load_invocation_adapter(path: str) -> NOOAInvocationAdapter:
 
 
 def validate_invocation(config: NOOAInvocationConfig) -> tuple[type[Agent], NOOAInvocationAdapter]:
-    """Validate agent construction and the Responses invocation adapter at startup."""
+    """Validate agent construction and the Responses invocation adapter at startup (embedded execution)."""
 
+    if config.invocation_adapter is None:
+        raise ValueError("embedded execution requires nooa.invocation_adapter")
     agent_class = load_agent_class(config.agent_class)
     try:
         inspect.signature(agent_class).bind(llm=object(), **config.init_kwargs)

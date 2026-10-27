@@ -25,6 +25,7 @@ class NOOATerminationReason(StrEnum):
     MAX_ITERATIONS_EXCEEDED = "max_iterations_exceeded"
     MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
     LOOP_DETECTED = "loop_detected"
+    RETRY_LIMIT_EXCEEDED = "retry_limit_exceeded"
     INVALID_POLICY_OUTPUT = "invalid_policy_output"
     MODEL_REJECTED = "model_rejected"
     TIMEOUT_EXCEEDED = "timeout_exceeded"

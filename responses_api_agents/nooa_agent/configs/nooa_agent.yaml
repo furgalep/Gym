@@ -10,6 +10,11 @@ nooa_agent:
         name: policy_model
       nooa:
         agent_class: nooa_bench.bench_agent:BenchAgent
+        # Sandboxed execution: `await agent.<turn_method>(task_text)` inside the task sandbox, run by
+        # nooa_bench.gym_worker on the staged NOOA runtime. Any NOOA agent class works here.
+        turn_method: _solve_task
+        tool_binding: null         # module:callable(agent, tools) replacing the default tool translation
+        # Embedded execution only: the adapter runs in this server.
         invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
         init_kwargs: {}
         execution_mode: embedded

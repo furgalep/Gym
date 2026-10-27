@@ -49,6 +49,7 @@ from responses_api_agents.nooa_agent.runner import (
 from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
 from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.worker import task_text
 
 
 @dataclass
@@ -125,21 +126,22 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             runner = SandboxNOOARunner(
                 sandbox=sandbox,
                 workdir=body.sandbox_access.workdir,
-                python="",
+                python=self.config.runtime_python or "",
                 invocation=self.config.nooa,
                 model_base_url=model_base_url,
-                model_server_name=self.config.model_server.name,
                 timeout=self.config.sandbox_runner_timeout_seconds,
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
+                shell_timeout_seconds=self.config.shell_timeout_seconds,
             )
             state.runner = runner
             try:
-                runner.python = await prepare_nooa_runtime(
-                    sandbox,
-                    wheelhouse_path=self.config.runtime_wheelhouse,
-                )
+                if not runner.python:
+                    runner.python = await prepare_nooa_runtime(
+                        sandbox,
+                        wheelhouse_path=self.config.runtime_wheelhouse,
+                    )
                 await runner.prepare()
             except BaseException as error:
                 # Main retains this state for close while rejecting activation
@@ -159,6 +161,11 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Agent session does not match the rollout route")
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "Resource tools require a direct HTTP grant")
+        if isinstance(state.runner, SandboxNOOARunner):
+            try:  # a request the worker cannot run is a terminal 422, never a cached activation
+                task_text(body)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
         route = self.url_path_for_request("/v1/responses", request)
         async with state.lock:
             if state.closing:
@@ -200,6 +207,11 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if state.result is not None:
                 state.result.termination_reason = NOOATerminationReason.CANCELLED
             raise
+        except TimeoutError as error:
+            if isinstance(state.runner, SandboxNOOARunner):
+                # The supervisor stopped the worker at its budget and it left no checkpoint.
+                raise HTTPException(504, f"NOOA agent exceeded its time budget: {error}") from error
+            raise
         except Exception as error:
             if isinstance(error, NOOARunFailure):
                 state.result = error.result
@@ -208,8 +220,15 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if is_transient_infrastructure_error(error):
                 raise HTTPException(503, "NOOA dependency request failed") from error
             raise
+        # The worker's episode is already projected: its output is the policy's own items and
+        # metadata.terminal_response_id carries the attribution, so no final message is synthesised.
+        response = (
+            state.result.episode.response
+            if isinstance(state.runner, SandboxNOOARunner)
+            else finalize_run_result(state.result)[0]
+        )
         return self.report_outcome(
-            finalize_run_result(state.result)[0],
+            response,
             {
                 "termination_reason": state.result.termination_reason,
                 "model_status_code": state.result.model_status_code,
@@ -236,27 +255,35 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                     )
             await asyncio.gather(execution, return_exceptions=True)
         if isinstance(state.runner, SandboxNOOARunner):
-            recovered = state.runner.artifact or state.runner.checkpoint
-            if recovered is not None:
-                state.resources_cookies.update(recovered.resource_cookies)
-                state.model_cookies.update(recovered.model_cookies)
-                if state.result is None and recovered.response is not None:
-                    state.result = recovered.run_result()
-                    # Late evidence cannot turn a failed activation into a
-                    # successful or gradable result.
+            episode = state.runner.episode
+            if episode is not None:
+                state.resources_cookies.update(episode.resource_cookies)
+                if state.result is None and state.activation_key is not None:
+                    # A checkpoint the worker wrote while being stopped: kept as evidence, but late
+                    # evidence cannot turn a cancelled or failed activation into a gradable result.
+                    state.result = state.runner.run_result(
+                        episode,
+                        state.activation_key[0],
+                        state.request.episode_id.capture_key,
+                        state.model_cookies,
+                        state.resources_cookies,
+                    )
                     if execution is not None and execution.cancelled():
                         state.result.termination_reason = NOOATerminationReason.CANCELLED
                     elif execution is not None and (error := execution.exception()) is not None:
                         state.result.termination_reason = NOOATerminationReason.INFRASTRUCTURE_ERROR
                         state.result.termination_error = str(error)
-                if state.result is not None:
-                    state.result.resource_cookies.update(recovered.resource_cookies)
-                    state.result.model_cookies.update(recovered.model_cookies)
+                elif state.result is not None:
+                    state.result.resource_cookies.update(episode.resource_cookies)
         return self._session_evidence(state)
 
     def _session_evidence(self, state: NOOASessionState) -> AgentCloseSessionResponse:
-        observations = state.runner.observations if isinstance(state.runner, SandboxNOOARunner) else None
-        if state.result is not None:
+        observations = None
+        if isinstance(state.runner, SandboxNOOARunner):
+            # Observations only: the worker's episode already names every invocation and tool call,
+            # and Gym joins the model server's capture to them. Nothing to finalize or merge.
+            observations = state.runner.observations
+        elif state.result is not None:
             _, finalized = finalize_run_result(state.result)
             if observations is None:
                 observations = finalized

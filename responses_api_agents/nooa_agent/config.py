@@ -63,6 +63,14 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None, gt=0, description="Known policy context window used by NOOA's context planner."
     )
 
+    runtime_python: str | None = Field(
+        default=None,
+        description="Interpreter inside the sandbox that already has NOOA installed; skips runtime preparation. "
+        "Only meaningful with a local sandbox provider (tests, conformance).",
+    )
+    shell_timeout_seconds: int = Field(
+        default=180, gt=0, description="Per-command limit for the worker's shell tool, when the agent has one."
+    )
     sandbox_runner_timeout_seconds: float = Field(
         default=21420,
         gt=0,
