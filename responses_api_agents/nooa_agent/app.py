@@ -134,6 +134,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
                 shell_timeout_seconds=self.config.shell_timeout_seconds,
+                trace=self.config.tracing.worker_payload,
+                artifacts_output=self.config.tracing.artifacts_output,
             )
             state.runner = runner
             try:

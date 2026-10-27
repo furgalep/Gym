@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 from shlex import quote
 from typing import Any
 from uuid import uuid4
@@ -12,7 +14,7 @@ from uuid import uuid4
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
@@ -27,6 +29,9 @@ from responses_api_agents.nooa_agent.worker import (
     termination,
     worker_payload,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SandboxNOOARunner:
@@ -46,6 +51,7 @@ class SandboxNOOARunner:
         close_timeout: float = 30,
         shell_timeout_seconds: int = 180,
         trace: dict[str, Any] | None = None,
+        artifacts_output: Path | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.python = python
@@ -57,6 +63,8 @@ class SandboxNOOARunner:
         self.close_timeout = close_timeout
         self.shell_timeout_seconds = shell_timeout_seconds
         self.trace = dict(trace or {})
+        self.artifacts_output = artifacts_output
+        self.artifacts: Path | None = None  # local archive of NOOA's exports, once collected
         # Construct before prepare so failed setup can release the borrowed client.
         self.session = SandboxSession[Episode](
             sandbox=sandbox,
@@ -67,6 +75,7 @@ class SandboxNOOARunner:
         )
         self.episode: Episode | None = None
         self.failure: str | None = None
+        self.artifacts_error: str | None = None
 
     @property
     def directory(self) -> str:
@@ -75,7 +84,10 @@ class SandboxNOOARunner:
 
     @property
     def observations(self) -> AgentObservationBundle:
-        return evidence(self.episode, self.failure)
+        bundle = evidence(self.episode, self.failure)
+        if self.artifacts_error:
+            bundle.gaps.append(ObservationGap(code="artifacts_capture_failed", detail=self.artifacts_error))
+        return bundle
 
     async def prepare(self) -> None:
         """Create session files outside the graded repository."""
@@ -103,7 +115,7 @@ class SandboxNOOARunner:
                 max_policy_calls=self.max_policy_calls,
                 context_window=self.context_window,
                 shell_timeout_seconds=self.shell_timeout_seconds,
-                trace={**self.trace, "artifacts_dir": f"{self.directory}/artifacts"} if self.trace else None,
+                trace={**self.trace, "artifacts_dir": self.artifacts_dir} if self.trace else None,
             )
             await upload_text(self.sandbox, path=inputs, text=json.dumps(payload))
             return SandboxCommand(
@@ -141,7 +153,43 @@ class SandboxNOOARunner:
             raise
         self.episode = episode
         request.resource_cookies.update(episode.resource_cookies)
+        if self.collects_artifacts:
+            await self._collect_artifacts(request.rollout_id)
+            if self.artifacts is not None:
+                episode.runtime["artifacts_archive"] = str(self.artifacts)
         return self.run_result(episode, body, request.rollout_id, request.model_cookies, request.resource_cookies)
+
+    @property
+    def artifacts_dir(self) -> str:
+        """Where the worker writes NOOA's exports (ATIF, OTLP JSONL), inside the session directory."""
+        return f"{self.directory}/artifacts"
+
+    @property
+    def collects_artifacts(self) -> bool:
+        return self.artifacts_output is not None and any(k in self.trace for k in ("atif", "trace_jsonl"))
+
+    async def _collect_artifacts(self, rollout_id: str) -> None:
+        """Archive NOOA's exports out of the sandbox, one tarball per rollout.
+
+        A failure here is logged and recorded as a gap, never a failed episode: the exports are
+        evidence beside the rollout, and Gym's model server already holds the training capture.
+        """
+        assert self.artifacts_output is not None
+        remote = f"{self.directory}/artifacts.tar.gz"
+        local = Path(self.artifacts_output) / f"{rollout_id}.tar.gz"
+        try:
+            result = await self.sandbox.exec(
+                f"tar -czf {quote(remote)} -C {quote(self.directory)} artifacts", cwd="/", timeout_s=120
+            )
+            if result.return_code != 0 or result.error_type:
+                raise RuntimeError(f"tar exited {result.return_code}: {(result.stderr or '')[-500:]}")
+            local.parent.mkdir(parents=True, exist_ok=True)
+            await self.sandbox.download(remote, local)
+        except Exception as error:
+            LOGGER.warning("Could not collect NOOA artifacts for rollout %s: %s", rollout_id, error)
+            self.artifacts_error = f"{type(error).__name__}: {error}"
+            return
+        self.artifacts = local
 
     @staticmethod
     def run_result(

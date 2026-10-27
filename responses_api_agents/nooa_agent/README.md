@@ -88,6 +88,17 @@ the session stays available for a close retry. The bounded join also applies to 
 interrupted by session close returns HTTP 409 to a caller whose request was not itself cancelled.
 
 
+### Traces and trajectories
+
+NOOA's own instrumentation runs inside the sandbox whatever the harness returns: ATIF trajectories
+(`nooa.atif`) and OTLP spans (NOOA's tracing). Both are on by default (`tracing.atif`, `tracing.trace_jsonl`)
+and written under the session directory; after the episode the server archives them into
+`tracing.artifacts_output/<rollout_id>.tar.gz` (default `nooa-artifacts/` under the server's working directory)
+and records the archive path as `metadata.harness_artifacts_archive`. `tracing.otlp_endpoint` additionally
+ships the same spans live to a collector; it defaults to Gym's `OTEL_EXPORTER_OTLP_ENDPOINT` (the job's
+OpenTelemetry collector) when that is set, so the trace viewer sees NOOA spans beside Gym's own. A failed
+collection is an `artifacts_capture_failed` observation gap, never a failed episode.
+
 ## Sandbox worker supervision
 
 `sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. At the budget

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -335,3 +336,87 @@ def test_seed_without_an_archive_or_interpreter_is_a_422_before_the_sandbox_is_t
         asyncio.run(agent._seed_agent_session_state(_seed_request()))
     detail = getattr(getattr(info.value, "error", info.value), "detail", str(info.value))
     assert "runtime_tarball" in str(detail)
+
+
+# -- traces and trajectories -------------------------------------------------------------------------
+
+
+class _ArchivingSandbox(_Sandbox):
+    """Records the archive command and the download the runner asks for."""
+
+    def __init__(self, *, tar_exit: int = 0):
+        super().__init__()
+        self.tar_exit = tar_exit
+        self.downloads: list[tuple[str, str]] = []
+
+    async def exec(self, command, *, cwd=None, timeout_s=None):
+        self.commands.append(command)
+        code = self.tar_exit if command.startswith("tar ") else 0
+        return type("R", (), {"return_code": code, "stdout": "", "stderr": "disk full", "error_type": None})()
+
+    async def download(self, remote, local):
+        self.downloads.append((remote, str(local)))
+        Path(local).write_bytes(b"tgz")
+
+
+def _tracing_runner(session: _Session, tmp_path, *, tar_exit: int = 0, trace: dict | None = None) -> SandboxNOOARunner:
+    runner = _runner(
+        session,
+        trace={"atif": True, "trace_jsonl": True, "otlp_endpoint": "http://c:4318/v1/traces"}
+        if trace is None
+        else trace,
+        artifacts_output=tmp_path / "out",
+    )
+    runner.sandbox = _ArchivingSandbox(tar_exit=tar_exit)
+    return runner
+
+
+def test_tracing_flags_reach_the_worker_and_artifacts_are_archived_per_rollout(worker_result, tmp_path):
+    worker_result["text"] = episode().model_dump_json()
+    runner = _tracing_runner(_Session(), tmp_path)
+    result = asyncio.run(runner.run(_request()))
+    payload = worker_result["uploaded"][0]
+    assert payload["atif"] is True and payload["trace_jsonl"] is True
+    assert payload["otlp_endpoint"] == "http://c:4318/v1/traces"
+    assert payload["artifacts_dir"] == "/tmp/nemo-gym-nooa/x/artifacts"
+    sandbox = runner.sandbox
+    assert sandbox.commands[-1] == "tar -czf /tmp/nemo-gym-nooa/x/artifacts.tar.gz -C /tmp/nemo-gym-nooa/x artifacts"
+    assert sandbox.downloads == [("/tmp/nemo-gym-nooa/x/artifacts.tar.gz", str(tmp_path / "out" / "r-0.tar.gz"))]
+    assert runner.artifacts == tmp_path / "out" / "r-0.tar.gz" and runner.artifacts.read_bytes() == b"tgz"
+    assert result.episode.response.metadata["harness_artifacts_archive"] == str(tmp_path / "out" / "r-0.tar.gz")
+    assert runner.observations.gaps == []
+
+
+def test_a_failed_artifact_collection_is_a_gap_not_a_failed_episode(worker_result, tmp_path):
+    worker_result["text"] = episode().model_dump_json()
+    runner = _tracing_runner(_Session(), tmp_path, tar_exit=1)
+    result = asyncio.run(runner.run(_request()))
+    assert result.termination_reason is None and result.episode.response.status == "completed"
+    assert runner.artifacts is None and "disk full" in runner.artifacts_error
+    assert [g.code for g in runner.observations.gaps] == ["artifacts_capture_failed"]
+    assert "harness_artifacts_archive" not in result.episode.response.metadata
+
+
+def test_live_export_alone_archives_nothing(worker_result, tmp_path):
+    worker_result["text"] = episode().model_dump_json()
+    runner = _tracing_runner(_Session(), tmp_path, trace={"otlp_endpoint": "http://c:4318/v1/traces"})
+    asyncio.run(runner.run(_request()))
+    assert not runner.collects_artifacts and runner.sandbox.downloads == []
+    assert "artifacts_dir" in worker_result["uploaded"][0]  # harmless; the worker only uses it with atif/jsonl
+
+
+def test_tracing_config_defaults_save_everything_and_follow_gyms_collector(monkeypatch):
+    from responses_api_agents.nooa_agent.config import NOOATracingConfig
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    tracing = NOOATracingConfig()
+    assert tracing.atif and tracing.trace_jsonl and tracing.otlp_endpoint is None
+    assert tracing.artifacts_output == Path("nooa-artifacts") and tracing.collects_artifacts
+    assert tracing.worker_payload == {"atif": True, "trace_jsonl": True}
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    assert NOOATracingConfig().otlp_endpoint == "http://collector:4318/v1/traces"
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318/v1/traces/")
+    assert NOOATracingConfig().otlp_endpoint == "http://collector:4318/v1/traces"
+    off = NOOATracingConfig(atif=False, trace_jsonl=False, artifacts_output=None, otlp_endpoint=None)
+    assert off.worker_payload == {} and not off.collects_artifacts
+    assert agent_config().tracing.atif is True  # the server config carries the defaults

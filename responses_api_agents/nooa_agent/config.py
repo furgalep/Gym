@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -39,10 +39,60 @@ from responses_api_agents.nooa_agent.invocation import (
 )
 
 
+def _otlp_traces_endpoint() -> str | None:
+    """NOOA's OTLP exporter wants the traces URL; Gym's telemetry names the collector's base URL."""
+    base = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not base:
+        return None
+    base = base.rstrip("/")
+    return base if base.endswith("/v1/traces") else f"{base}/v1/traces"
+
+
+class NOOATracingConfig(BaseModel):
+    """NOOA's own instrumentation inside the sandbox, and where it ends up.
+
+    ATIF trajectories and OTLP spans are written by the worker; after the episode the agent server
+    archives them out of the sandbox, one ``<rollout_id>.tar.gz`` per episode under ``artifacts_output``.
+    ``otlp_endpoint`` additionally ships the spans live to a collector, by default the one Gym's
+    telemetry points at (``OTEL_EXPORTER_OTLP_ENDPOINT``); the JSONL spool keeps the run's own copy.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    atif: bool = Field(default=True, description="Export ATIF trajectories (nooa.atif) from the worker.")
+    trace_jsonl: bool = Field(default=True, description="Spool NOOA's OTLP spans as JSONL files in the sandbox.")
+    otlp_endpoint: str | None = Field(
+        default_factory=_otlp_traces_endpoint,
+        description="Collector URL for live span export from the sandbox; the pod must be able to reach it.",
+    )
+    artifacts_output: Path | None = Field(
+        default=Path("nooa-artifacts"),
+        description="Local directory receiving one archive of the sandbox artifacts per rollout; null discards them.",
+    )
+
+    @property
+    def worker_payload(self) -> dict[str, object]:
+        """The keys nooa_bench.gym_worker reads; ``artifacts_dir`` is added by the runner."""
+        payload: dict[str, object] = {}
+        if self.atif:
+            payload["atif"] = True
+        if self.trace_jsonl:
+            payload["trace_jsonl"] = True
+        if self.otlp_endpoint:
+            payload["otlp_endpoint"] = self.otlp_endpoint
+        return payload
+
+    @property
+    def collects_artifacts(self) -> bool:
+        return (self.atif or self.trace_jsonl) and self.artifacts_output is not None
+
+
 class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     """Gym server configuration for the NOOA adapter."""
 
     model_config = ConfigDict(extra="forbid")
+
+    tracing: NOOATracingConfig = Field(default_factory=NOOATracingConfig)
 
     resources_server: ResourcesServerRef | None = Field(
         default=None,

@@ -245,3 +245,6 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 
 # Default shared datasets folder for Harbor-format tasks (see nemo_gym/tasks/harbor).
 datasets/
+
+# NOOA agent: per-rollout trace and trajectory archives collected from the sandbox
+nooa-artifacts/
