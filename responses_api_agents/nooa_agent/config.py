@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -48,12 +49,18 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",
     )
     model_server: ModelServerRef
-    runtime_wheelhouse: Path | None = Field(
-        default=None,
-        description="Controller-prepared offline runtime bundle; when set, task setup uses no package-network access.",
+    runtime_tarball: str | None = Field(
+        default_factory=lambda: os.environ.get("NOOA_GYM_RUNTIME_TARBALL") or None,
+        description="Prebuilt relocatable NOOA runtime for glibc task images (see runtime.py build), staged into the "
+        "sandbox at seed time; nothing is resolved or installed inside the sandbox.",
     )
-    runtime_wheelhouse_required: bool = Field(
-        default=False, description="Require an explicitly prepared offline runtime before starting this agent."
+    runtime_tarball_musl: str | None = Field(
+        default_factory=lambda: os.environ.get("NOOA_GYM_RUNTIME_TARBALL_MUSL") or None,
+        description="The musl build for Alpine-style task images; staging probes the image's libc and picks it.",
+    )
+    runtime_tarball_required: bool = Field(
+        default=False,
+        description="Require a prebuilt runtime before starting this agent (network-restricted sandboxes).",
     )
     nooa: NOOAInvocationConfig
     max_policy_calls: int | None = Field(
@@ -84,24 +91,24 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
     )
 
-    @field_validator("runtime_wheelhouse")
+    @field_validator("runtime_tarball", "runtime_tarball_musl")
     @classmethod
-    def normalize_runtime_wheelhouse(cls, value: Path | None) -> Path | None:
+    def normalize_runtime_tarball(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        expanded = value.expanduser()
+        expanded = Path(value).expanduser()
         if not expanded.is_absolute():
             raise ValueError(
-                "runtime_wheelhouse must be an absolute path (or ~/path); relative server paths are ambiguous"
+                "runtime tarballs must be absolute paths (or ~/path); relative server paths are ambiguous"
             )
-        return expanded.resolve()
+        return str(expanded.resolve())
 
     @model_validator(mode="after")
     def require_prepared_runtime(self) -> NOOAAgentConfig:
-        if self.runtime_wheelhouse_required and self.runtime_wheelhouse is None:
+        if self.runtime_tarball_required and self.runtime_tarball is None and self.runtime_python is None:
             raise ValueError(
-                "This recipe requires an offline NOOA runtime. Set NOOA_SWE_RUNTIME_WHEELHOUSE to an absolute "
-                "bundle path and prepare it with python -m responses_api_agents.nooa_agent.offline_runtime "
-                "--output PATH --target x86_64/gnu before starting servers."
+                "This recipe requires a prebuilt NOOA runtime. Set NOOA_GYM_RUNTIME_TARBALL (and "
+                "NOOA_GYM_RUNTIME_TARBALL_MUSL for Alpine images) to archives built with "
+                "python -m responses_api_agents.nooa_agent.runtime build before starting servers."
             )
         return self

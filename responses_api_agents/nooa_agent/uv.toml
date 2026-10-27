@@ -1,0 +1,49 @@
+# Resolver policy for this server's venv and for the pod runtime tarball
+# (runtime.py passes it as --config-file too).
+#
+# Why this file exists: Gym's root [tool.uv] exclude-dependencies drops
+# `cryptography` (an mlflow trim), and from uv 0.11.24 that exclusion reaches
+# every venv resolved inside the checkout. An exclusion beats overrides.txt,
+# so the only way to get `cryptography` back (mcp>=2.2, which litellm's
+# Responses path imports, needs it) is a config file that replaces discovery.
+#
+# This mirrors the root pyproject's [tool.uv] policy with ONLY `cryptography`
+# removed from exclude-dependencies. It duplicates root policy and can drift:
+# when the root lists change, regenerate this file from them.
+# Matches Gym pyproject as of 2daf3aed.
+required-version = ">=0.9.30"
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
+]
+override-dependencies = [
+    "spacy>=3.8.13",
+    "wcwidth; sys_platform == 'never'",
+    "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
+]
+exclude-dependencies = [
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    # "cryptography" deliberately not excluded here: mcp>=2.2 imports it.
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+]

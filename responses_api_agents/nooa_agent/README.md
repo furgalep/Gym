@@ -61,7 +61,27 @@ for setup, recipes, service lifecycle and observation limits.
 Sandboxed mode requires the Resources server to provide `sandbox_access`; otherwise seeding returns HTTP 422.
 Its provider must support `AsyncSandbox.connect`. The Gym model server address must be reachable from inside
 the task sandbox: configure `use_absolute_ip` / `default_host` for the deployment instead of a controller-only
-loopback address. Runtime packaging runs in a thread so seeding does not block other agent requests.
+loopback address.
+
+### Runtime
+
+Nothing is resolved or installed inside the sandbox. Build the runtime once per libc on the controller from the
+NOOA revision pinned in `requirements.txt` (`<nooa>` is a checkout of labs-OO-Agents at that revision; local
+directories are built into wheels first), then point the server at the archives with `runtime_tarball` and
+`runtime_tarball_musl`, or the `NOOA_GYM_RUNTIME_TARBALL` and `NOOA_GYM_RUNTIME_TARBALL_MUSL` environment
+variables:
+
+```bash
+python -m responses_api_agents.nooa_agent.runtime build --output nooa-runtime-x86_64.tar.gz --arch x86_64 \
+    <nooa> <nooa>/packages/nooa-cli <nooa>/packages/nooa-bench "jsonschema>=4.25.1,<5"
+python -m responses_api_agents.nooa_agent.runtime build --output nooa-runtime-x86_64-musl.tar.gz \
+    --target x86_64-unknown-linux-musl <nooa> <nooa>/packages/nooa-cli <nooa>/packages/nooa-bench "jsonschema>=4.25.1,<5"
+```
+
+Set `UV_CONSTRAINT=<constraints file>` while building to pin third-party versions across rebuilds. Seeding probes
+the image's libc, uploads the matching archive, extracts it under a digest-named directory in `/tmp` and runs one
+import check; a sandbox that already holds a healthy copy is reused. `runtime_tarball_required: true` makes a
+recipe refuse to start without an archive (network-restricted task sandboxes).
 
 Close raises if the worker stop is unconfirmed or the remaining activation cannot be joined within its budget;
 the session stays available for a close retry. The bounded join also applies to embedded mode. An activation

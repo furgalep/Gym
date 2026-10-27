@@ -10,9 +10,10 @@ runs NOOA inside the task sandbox and reuses Terminal-Bench 2.1's existing prepa
 Configure a sandbox provider and your policy endpoint in a private `private-policy-provider.yaml` overlay;
 the provider must support the task images and allow the sandbox to reach Gym's model server. Keep credentials
 in your local configuration. Set `use_absolute_ip: true` in that overlay and configure `default_host` when
-necessary so the advertised model URL is reachable from the sandbox, rather than loopback. Runtime installation
-also needs outbound package access unless the agent’s `runtime_wheelhouse` points to a prepared offline wheelhouse
-on the controller. The resources server owns sandbox creation, verification, and cleanup.
+necessary so the advertised model URL is reachable from the sandbox, rather than loopback. The NOOA runtime is
+prebuilt on the controller and staged into each task sandbox (`runtime_tarball` and `runtime_tarball_musl`, or
+the `NOOA_GYM_RUNTIME_TARBALL` and `NOOA_GYM_RUNTIME_TARBALL_MUSL` environment variables); the sandbox needs no
+package access. The resources server owns sandbox creation, verification, and cleanup.
 
 From the repository root:
 

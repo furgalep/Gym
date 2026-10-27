@@ -44,40 +44,41 @@ creation errors fail explicitly; they never trigger an unrestricted retry.
 Choose the provider explicitly with a provider config overlay. The NOOA recipe does not load
 OpenSandbox credentials when another provider is selected. Existing unrestricted local/Docker configurations
 remain available only when the user explicitly sets `task_network_policy: null`; restricted configurations
-never disable their policy automatically. An intentionally online runtime also needs
-`runtime_wheelhouse_required: false` and `runtime_wheelhouse: null`. These choices permit internet access
-and are unsuitable for a restricted evaluation.
+never disable their policy automatically. The NOOA runtime is always prebuilt and staged
+(`runtime_tarball`, `runtime_tarball_musl`); a sandbox never downloads packages, so no runtime setting weakens
+a restricted evaluation.
 
 Configure the OpenSandbox deployment outside the task: no task environment variable
 can turn a DNS-only deployment into `dns+nft` enforcement.
 
 ## Prepare and run
 
-Use a controller with Python 3.13.14 or newer, package/GitHub access, and Docker
-capable of running a Linux amd64 build container. Install Gym and the NOOA agent
-requirements in your controller environment. Docker builds the runtime; the
-benchmark task and grading sandboxes run on OpenSandbox.
+Use a controller with Python 3.13.14 or newer, `uv`, and package/GitHub access. Install Gym and the NOOA agent
+requirements in your controller environment. The controller builds the runtime archives; the benchmark task and
+grading sandboxes run on OpenSandbox.
 
-Prebuilding is intentional: Docker, package indexes, and GitHub are available on the build controller,
-not necessarily on the agent host or inside restricted task sandboxes. Startup reports a setup error
-when the required bundle path is unset; it does not attempt an online task installation.
+Prebuilding is intentional: package indexes and GitHub are available on the build controller, not
+necessarily on the agent host or inside restricted task sandboxes. Startup reports a setup error when the
+required archive path is unset; it never attempts an online task installation.
 
-From the repository root, prepare a fresh bundle and the shared SWE dataset:
+From the repository root, build the archives (`<nooa>` is a checkout of labs-OO-Agents at the revision pinned
+in `responses_api_agents/nooa_agent/requirements.txt`) and prepare the shared SWE dataset:
 
 ```bash
-export NOOA_SWE_RUNTIME_WHEELHOUSE=/absolute/path/to/new-owned-runtime-bundle
-python -m responses_api_agents.nooa_agent.offline_runtime \
-  --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
+export NOOA_GYM_RUNTIME_TARBALL=/absolute/path/nooa-runtime-x86_64.tar.gz
+export NOOA_GYM_RUNTIME_TARBALL_MUSL=/absolute/path/nooa-runtime-x86_64-musl.tar.gz
+python -m responses_api_agents.nooa_agent.runtime build --output "$NOOA_GYM_RUNTIME_TARBALL" --arch x86_64 \
+  <nooa> <nooa>/packages/nooa-cli <nooa>/packages/nooa-bench "jsonschema>=4.25.1,<5"
+python -m responses_api_agents.nooa_agent.runtime build --output "$NOOA_GYM_RUNTIME_TARBALL_MUSL" \
+  --target x86_64-unknown-linux-musl <nooa> <nooa>/packages/nooa-cli <nooa>/packages/nooa-bench "jsonschema>=4.25.1,<5"
 python benchmarks/swebench/pro/prepare.py
 ```
 
-The bundle contains portable Python, the pinned NOOA packages, the Gym runtime,
-and all dependency wheels. Its manifest binds the source, Python and wheel checksums,
-architecture, and builder glibc version. Task setup uses local wheels with
-`--no-index --no-deps` in a private prefix. It preserves the task image and its Python.
-Missing, incompatible, or corrupted bundles fail setup without an online fallback.
-Source or dependency changes require a fresh bundle directory. An existing empty output directory is
-accepted; a nonempty incompatible directory is preserved and rejected. Use an absolute bundle path or
+Each archive is a python-build-standalone interpreter with NOOA and its dependencies installed into its own
+site-packages (local source directories are built into wheels first; set `UV_CONSTRAINT` to pin third-party
+versions across rebuilds). Seeding probes the task image's libc, uploads the matching archive, extracts it under
+a digest-named directory in `/tmp` and runs one import check; the task image and its Python are untouched.
+A missing or unhealthy archive fails setup without an online fallback. Use an absolute archive path or
 `~/...` (expanded by both preparation and agent configuration). Relative agent paths are rejected because
 the server working directory differs from the preparation shell. An existing bundle
 can be checked with the same command plus `--validate-only`.

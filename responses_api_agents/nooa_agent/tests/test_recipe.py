@@ -100,7 +100,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
         "POLICY_BASE_URL": "http://model.invalid/v1",
         "POLICY_API_KEY": "fixture",
         "POLICY_MODEL_NAME": "fixture",
-        "NOOA_SWE_RUNTIME_WHEELHOUSE": str(tmp_path / "wheelhouse"),
+        "NOOA_GYM_RUNTIME_TARBALL": str(tmp_path / "nooa-runtime-x86_64.tar.gz"),
     }.items():
         monkeypatch.setenv(key, value)
     parser = GlobalConfigDictParser()
@@ -132,7 +132,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     assert resources.sandbox_config.provider_options.platform == {"os": "linux", "arch": "amd64"}
     assert resources.task_network_policy.model_server.name == agent.model_server.name
     assert "network_policy" not in resources.sandbox_config.provider_options
-    assert agent.runtime_wheelhouse == tmp_path / "wheelhouse"
+    assert agent.runtime_tarball == str(tmp_path / "nooa-runtime-x86_64.tar.gz") and agent.runtime_tarball_required
     assert "sandbox" not in config  # The caller explicitly selects a provider overlay.
     assert resources.datasets[0].jsonl_fpath == "benchmarks/swebench/data/swebench_pro_benchmark.jsonl"
     assert resources.datasets[0].prepare_script == "benchmarks/swebench/pro/prepare.py"
@@ -233,8 +233,8 @@ def test_explicit_unrestricted_docker_config_needs_no_opensandbox_credentials(mo
     resources = config.swebench_pro_nooa_resources_server.resources_servers.swebench_pro
     resources.task_network_policy = None
     agent = config.swebench_pro_nooa_agent.responses_api_agents.nooa_agent
-    agent.runtime_wheelhouse_required = False
+    agent.runtime_tarball_required = False
     parsed = NOOAAgentConfig(name="agent", host="localhost", port=8001, **OmegaConf.to_container(agent, resolve=True))
-    assert parsed.runtime_wheelhouse is None
+    assert parsed.runtime_tarball is None
     assert resources.task_network_policy is None
     assert "docker" in OmegaConf.to_container(config.sandbox, resolve=True)

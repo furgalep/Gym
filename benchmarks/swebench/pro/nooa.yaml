@@ -40,9 +40,11 @@ swebench_pro_nooa_agent:
       nooa:
         execution_mode: sandboxed
       max_policy_calls: null
-      # Built on the controller before seeding; task installation performs no downloads.
-      runtime_wheelhouse: ${oc.env:NOOA_SWE_RUNTIME_WHEELHOUSE,null}
-      runtime_wheelhouse_required: true
+      # Prebuilt on the controller (python -m responses_api_agents.nooa_agent.runtime build); staging only
+      # uploads and extracts, so the restricted task sandbox performs no downloads.
+      runtime_tarball: ${oc.env:NOOA_GYM_RUNTIME_TARBALL,null}
+      runtime_tarball_musl: ${oc.env:NOOA_GYM_RUNTIME_TARBALL_MUSL,null}
+      runtime_tarball_required: true
 
 swebench_pro_nooa:
   _inherit_from: single_agent_turn_legacy

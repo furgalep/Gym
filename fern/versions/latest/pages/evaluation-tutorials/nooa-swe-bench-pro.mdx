@@ -31,11 +31,12 @@ NOOA closes its worker and session before Resources verifies; the Resources-owne
 Verification can inspect persisted artifacts after agent cleanup. Tasks whose verifier requires a
 NOOA-started service to remain live are not supported by this lifecycle.
 
-Cold runtime setup requires Linux x86_64 or aarch64 with glibc, `bash`, `tar`, `gzip`, `sha256sum`, `flock`,
-`tee`, `mv` with `-T` support, and writable `/opt/nemo-gym-nooa` and `/tmp`. The controller supplies Python;
-Alpine/musl images are not supported. Python packages normally require outbound access during cold installation.
-The NOOA SWE-bench Pro recipe instead requires a controller-prepared offline wheelhouse because its task sandbox
-allows only the Gym model-server host. Model and granted Resources URLs must be reachable from the sandbox;
+The NOOA runtime is prebuilt on the controller (`python -m responses_api_agents.nooa_agent.runtime build`): a
+relocatable Python with the pinned NOOA packages installed, one archive for glibc images and one for Alpine/musl
+images. Seeding probes the task image's libc, uploads the matching archive, extracts it under a digest-named
+directory in `/tmp` and runs one import check; nothing is resolved, downloaded or compiled inside the sandbox,
+which is why the recipe's task sandbox can allow only the Gym model-server host. Staging needs `sh`, `tar`,
+`gzip`, `mkdir`, `mv` and a writable `/tmp`. Model and granted Resources URLs must be reachable from the sandbox;
 configure `use_absolute_ip` / `default_host` for the deployment. No host virtual environment or provider
 credentials are copied into the runner.
 
@@ -71,9 +72,13 @@ It restricts only the task sandbox on OpenSandbox; grading retains its original 
 runtime outside the task sandbox before startup:
 
 ```bash
-export NOOA_SWE_RUNTIME_WHEELHOUSE=/absolute/path/to/new-owned-runtime-bundle
-python -m responses_api_agents.nooa_agent.offline_runtime \
-  --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
+# <nooa> is a checkout of labs-OO-Agents at the revision pinned in responses_api_agents/nooa_agent/requirements.txt
+export NOOA_GYM_RUNTIME_TARBALL=/absolute/path/nooa-runtime-x86_64.tar.gz
+export NOOA_GYM_RUNTIME_TARBALL_MUSL=/absolute/path/nooa-runtime-x86_64-musl.tar.gz
+python -m responses_api_agents.nooa_agent.runtime build --output "$NOOA_GYM_RUNTIME_TARBALL" --arch x86_64 \
+  <nooa> <nooa>/packages/nooa-cli <nooa>/packages/nooa-bench "jsonschema>=4.25.1,<5"
+python -m responses_api_agents.nooa_agent.runtime build --output "$NOOA_GYM_RUNTIME_TARBALL_MUSL" \
+  --target x86_64-unknown-linux-musl <nooa> <nooa>/packages/nooa-cli <nooa>/packages/nooa-bench "jsonschema>=4.25.1,<5"
 python benchmarks/swebench/pro/prepare.py
 gym env start --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml

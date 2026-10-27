@@ -230,7 +230,7 @@ def test_seed_uses_runtime_python_without_preparing_a_runtime(monkeypatch):
     monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
     monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {"probe": {}})
     monkeypatch.setattr(app_module, "create_provider", lambda cfg: object())
-    monkeypatch.setattr(app_module, "prepare_nooa_runtime", never_prepare)
+    monkeypatch.setattr(app_module, "stage_runtime", never_prepare)
     monkeypatch.setattr(NOOAAgent, "resolve_model_base_url", lambda self, name, rollout_id=None: "http://h:1/v1")
     monkeypatch.setattr(NOOAAgent, "effective_tool_accesses", lambda self, body: [])
     state = asyncio.run(agent._seed_agent_session_state(_seed_request()))
@@ -291,3 +291,47 @@ def test_close_reports_worker_observations_and_a_late_checkpoint(worker_result):
     assert state.result.termination_reason is NOOATerminationReason.TIMEOUT_EXCEEDED
     assert response.agent_observations.gaps[0].code == "timeout_exceeded"
     assert {r.status for r in response.agent_observations.records if r.kind == "agent_invocation"} == {"incomplete"}
+
+
+def test_seed_stages_the_configured_archives_when_no_interpreter_is_given(monkeypatch, tmp_path):
+    gnu, musl = tmp_path / "gnu.tar.gz", tmp_path / "musl.tar.gz"
+    agent = _sandboxed_agent(runtime_tarball=str(gnu), runtime_tarball_musl=str(musl))
+    sandbox = _Sandbox()
+    staged: list = []
+
+    async def connect(descriptor, *, provider):
+        return sandbox
+
+    async def stage(sb, tarball, *, musl_tarball=None):
+        staged.append((sb, tarball, musl_tarball))
+        return "/tmp/nemo-gym-nooa-runtime/abcd/python/bin/python3"
+
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {"probe": {}})
+    monkeypatch.setattr(app_module, "create_provider", lambda cfg: object())
+    monkeypatch.setattr(app_module, "stage_runtime", stage)
+    monkeypatch.setattr(NOOAAgent, "resolve_model_base_url", lambda self, name, rollout_id=None: "http://h:1/v1")
+    monkeypatch.setattr(NOOAAgent, "effective_tool_accesses", lambda self, body: [])
+    state = asyncio.run(agent._seed_agent_session_state(_seed_request()))
+    assert staged == [(sandbox, str(gnu), str(musl))]
+    assert state.runner.python == "/tmp/nemo-gym-nooa-runtime/abcd/python/bin/python3"
+
+
+def test_seed_without_an_archive_or_interpreter_is_a_422_before_the_sandbox_is_touched(monkeypatch):
+    agent = _sandboxed_agent()
+    sandbox = _Sandbox()
+
+    async def connect(descriptor, *, provider):
+        return sandbox
+
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {"probe": {}})
+    monkeypatch.setattr(app_module, "create_provider", lambda cfg: object())
+    monkeypatch.setattr(NOOAAgent, "resolve_model_base_url", lambda self, name, rollout_id=None: "http://h:1/v1")
+    monkeypatch.setattr(NOOAAgent, "effective_tool_accesses", lambda self, body: [])
+    monkeypatch.delenv("NOOA_GYM_RUNTIME_TARBALL", raising=False)
+    agent.config.runtime_tarball = None
+    with pytest.raises(Exception) as info:
+        asyncio.run(agent._seed_agent_session_state(_seed_request()))
+    detail = getattr(getattr(info.value, "error", info.value), "detail", str(info.value))
+    assert "runtime_tarball" in str(detail)

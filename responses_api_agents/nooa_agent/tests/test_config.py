@@ -213,14 +213,28 @@ def test_shipped_yaml_declares_worker_and_close_defaults_below_episode_timeout()
     assert agent["sandbox_runner_timeout_seconds"] < environment["default_episode_timeout_seconds"]
 
 
-def test_runtime_wheelhouse_expands_user_and_resolves_absolute_path(
+def test_runtime_tarball_expands_user_and_resolves_absolute_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert agent_config(runtime_wheelhouse="~/bundle/../runtime").runtime_wheelhouse == tmp_path / "runtime"
-    assert agent_config(runtime_wheelhouse=tmp_path / "runtime").runtime_wheelhouse == tmp_path / "runtime"
-    for relative in ["bundle", "../bundle", Path(".")]:
-        with pytest.raises(ValidationError, match="must be an absolute path"):
-            agent_config(runtime_wheelhouse=relative)
-    with pytest.raises(ValidationError, match="Set NOOA_SWE_RUNTIME_WHEELHOUSE"):
-        agent_config(runtime_wheelhouse_required=True)
+    monkeypatch.delenv("NOOA_GYM_RUNTIME_TARBALL", raising=False)
+    monkeypatch.delenv("NOOA_GYM_RUNTIME_TARBALL_MUSL", raising=False)
+    assert agent_config(runtime_tarball="~/bundle/../rt.tar.gz").runtime_tarball == str(tmp_path / "rt.tar.gz")
+    assert agent_config(runtime_tarball_musl=str(tmp_path / "m.tar.gz")).runtime_tarball_musl == str(
+        tmp_path / "m.tar.gz"
+    )
+    for relative in ["bundle.tar.gz", "../bundle.tar.gz", "."]:
+        with pytest.raises(ValidationError, match="absolute paths"):
+            agent_config(runtime_tarball=relative)
+    with pytest.raises(ValidationError, match="Set NOOA_GYM_RUNTIME_TARBALL"):
+        agent_config(runtime_tarball_required=True)
+    # A local interpreter that already has NOOA satisfies the requirement (tests, conformance).
+    assert agent_config(runtime_tarball_required=True, runtime_python="/usr/bin/python3").runtime_tarball is None
+
+
+def test_runtime_tarballs_default_from_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NOOA_GYM_RUNTIME_TARBALL", str(tmp_path / "gnu.tar.gz"))
+    monkeypatch.setenv("NOOA_GYM_RUNTIME_TARBALL_MUSL", str(tmp_path / "musl.tar.gz"))
+    config = agent_config(runtime_tarball_required=True)
+    assert config.runtime_tarball == str(tmp_path / "gnu.tar.gz")
+    assert config.runtime_tarball_musl == str(tmp_path / "musl.tar.gz")

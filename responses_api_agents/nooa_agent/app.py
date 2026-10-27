@@ -46,8 +46,8 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunRequest,
     NOOARunResult,
 )
+from responses_api_agents.nooa_agent.runtime import stage_runtime
 from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
-from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.worker import task_text
 
@@ -138,9 +138,12 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             state.runner = runner
             try:
                 if not runner.python:
-                    runner.python = await prepare_nooa_runtime(
-                        sandbox,
-                        wheelhouse_path=self.config.runtime_wheelhouse,
+                    if self.config.runtime_tarball is None:
+                        raise HTTPException(
+                            422, "NOOA requires runtime_tarball (or runtime_python for a local sandbox)"
+                        )
+                    runner.python = await stage_runtime(
+                        sandbox, self.config.runtime_tarball, musl_tarball=self.config.runtime_tarball_musl
                     )
                 await runner.prepare()
             except BaseException as error:
