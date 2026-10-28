@@ -1,0 +1,11 @@
+# Resolver policy for the pod runtime tarball built by runtime.py (passed as --config-file for both
+# the native and the cross-target install).
+#
+# The runtime is NOOA plus its own dependency closure, installed into a standalone interpreter that
+# runs inside the task sandbox. It is not Gym's server venv, so none of the root [tool.uv] server
+# trims apply: no override-dependencies, no exclude-dependencies. A config file is still needed,
+# because uv's discovery inside the Gym checkout would otherwise apply the root policy (which, for
+# example, overrides `wcwidth` away although prompt-toolkit requires it, and excludes `cryptography`
+# although mcp>=2.2 imports it). Pins come only from the constraints the build is given
+# (UV_CONSTRAINT) and the packages' own metadata.
+required-version = ">=0.9.30"

@@ -160,3 +160,31 @@ def test_source_requirements_keep_their_extras_for_the_built_wheel(tmp_path):
     wheel = tmp_path / "nooa_atom-0.0.11-py3-none-any.whl"
     assert _wheel_spec(wheel, "[benchmark]") == f"nooa_atom[benchmark] @ {wheel.as_uri()}"
     assert _wheel_spec(wheel, "") == str(wheel)
+
+
+def test_the_builder_installs_under_the_runtime_config_without_server_trims(tmp_path):
+    """Both install commands pass the runtime-only uv config, and that config carries no override or
+    exclude entries: the tarball follows the packages' metadata and the given constraints, not Gym's
+    server-venv trims (which drop wcwidth and cryptography)."""
+    import tomllib
+
+    from responses_api_agents.nooa_agent.runtime import UV_CONFIG, install_command
+
+    assert UV_CONFIG.name == "runtime-uv.toml" and UV_CONFIG.is_file()
+    config = tomllib.loads(UV_CONFIG.read_text())
+    assert set(config) == {"required-version"}
+    for native in (True, False):
+        argv = install_command(
+            "uv",
+            python=tmp_path / "python3",
+            site=tmp_path / "site",
+            target="x86_64-unknown-linux-musl",
+            native=native,
+            specs=["nooa_atom[benchmark] @ file:///w/a.whl", "/w/b.whl"],
+        )
+        assert argv[:3] == ["uv", "pip", "install"]
+        assert argv[argv.index("--config-file") + 1] == str(UV_CONFIG)
+        assert argv[-2:] == ["nooa_atom[benchmark] @ file:///w/a.whl", "/w/b.whl"]
+    assert "--python-platform" in install_command(
+        "uv", python=tmp_path / "p", site=tmp_path / "s", target="x86_64-unknown-linux-gnu", native=False, specs=[]
+    )

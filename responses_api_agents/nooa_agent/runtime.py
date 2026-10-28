@@ -49,9 +49,38 @@ SANE_PATH = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 LIBC_PROBE = "uname -m && if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
 # cryptography is excluded by Gym's root resolver policy; the import proves the build used uv.toml.
 HEALTH_CHECK = "import cryptography, mcp, nooa, nooa_bench.gym_worker"
-# Replaces uv's config discovery during the build: inside the Gym checkout the root
-# [tool.uv] exclude-dependencies would silently drop cryptography from the tarball.
-UV_CONFIG = Path(__file__).with_name("uv.toml")
+# Replaces uv's config discovery during the build. Inside the Gym checkout the root [tool.uv]
+# policy would otherwise shape the tarball: its exclude-dependencies drop cryptography and its
+# override-dependencies drop wcwidth (a server-venv trim), although the runtime's own packages
+# require both. The runtime config carries no overrides or exclusions; pins come from the
+# constraints the build is given.
+UV_CONFIG = Path(__file__).with_name("runtime-uv.toml")
+
+
+def install_command(uv: str, *, python: Path, site: Path, target: str, native: bool, specs: list[str]) -> list[str]:
+    """The `uv pip install` argv for the runtime, native or cross-target, under UV_CONFIG."""
+    config = ["--config-file", str(UV_CONFIG)]
+    if native:
+        # Install into the interpreter's own site-packages: no venv, nothing to relocate but the tree.
+        return [uv, "pip", "install", *config, "--quiet", "--python", str(python), "--break-system-packages", *specs]
+    # Cross-build (for example x86_64 pods from an aarch64 controller): resolve wheels for the
+    # target platform without running its interpreter. Everything must ship as a wheel.
+    return [
+        uv,
+        "pip",
+        "install",
+        *config,
+        "--quiet",
+        "--target",
+        str(site),
+        "--only-binary",
+        ":all:",
+        "--python-version",
+        PYTHON_VERSION,
+        "--python-platform",
+        target,
+        *specs,
+    ]
 
 
 def python_url(target: str) -> str:
@@ -137,41 +166,9 @@ def build_runtime(
             out = wheels / str(index)  # one directory per source, so the wheel keeps its extras
             subprocess.run([uv, "build", "--quiet", "--wheel", "--out-dir", str(out), str(directory)], check=True)
             specs.extend(_wheel_spec(wheel, extras) for wheel in sorted(out.glob("*.whl")))
-        # Install into the interpreter's own site-packages: no venv, nothing to relocate but the tree.
         native = host_target() == target
-        config = ["--config-file", str(UV_CONFIG)]
-        if native:
-            install = [
-                uv,
-                "pip",
-                "install",
-                *config,
-                "--quiet",
-                "--python",
-                str(python),
-                "--break-system-packages",
-                *specs,
-            ]
-        else:
-            # Cross-build (for example x86_64 pods from an aarch64 controller): resolve wheels for the
-            # target platform without running its interpreter. Everything must ship as a wheel.
-            site = next((build / "python" / "lib").glob("python3.*")) / "site-packages"
-            install = [
-                uv,
-                "pip",
-                "install",
-                *config,
-                "--quiet",
-                "--target",
-                str(site),
-                "--only-binary",
-                ":all:",
-                "--python-version",
-                PYTHON_VERSION,
-                "--python-platform",
-                target,
-                *specs,
-            ]
+        site = next((build / "python" / "lib").glob("python3.*")) / "site-packages"
+        install = install_command(uv, python=python, site=site, target=target, native=native, specs=specs)
         subprocess.run(install, check=True)
         for marker in (build / "python").rglob("_editable_impl_*.pth"):
             raise RuntimeError(f"editable install leaked into the runtime: {marker.name}")
