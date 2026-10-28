@@ -141,6 +141,12 @@ class SandboxNOOARunner:
             )
 
         async def collect() -> Episode:
+            # Runs once inside the session's shared finalization, after the worker is stopped and
+            # before the session directory is released, whether run() or a concurrent close() gets
+            # there first. Archive first: a stopped or crashed worker's exports and sidecars are
+            # evidence for the row even when it left no gradable Episode.
+            if self.collects_artifacts:
+                await self._collect_artifacts(request.rollout_id)
             # A worker stopped at its budget checkpoints the episode it has (stop reason
             # `timeout_exceeded`) during the supervisor's TERM grace; one that left nothing behind
             # is an infrastructure failure, and the supervisor's receipt says which.
@@ -169,11 +175,6 @@ class SandboxNOOARunner:
         except Exception as error:
             self.failure = f"{type(error).__name__}: {error}"
             raise
-        finally:
-            # On every path, before the session is closed: a stopped or failed worker's exports and
-            # sidecars are evidence for that row even when it left no gradable Episode.
-            if self.collects_artifacts:
-                await self._collect_artifacts(request.rollout_id)
         self.episode = episode
         request.resource_cookies.update(episode.resource_cookies)
         if self.artifacts is not None:
@@ -242,3 +243,5 @@ class SandboxNOOARunner:
         await self.session.close(timeout=self.close_timeout)
         if self.episode is None and isinstance(self.session.artifacts, Episode):
             self.episode = self.session.artifacts
+            if self.artifacts is not None:
+                self.episode.runtime["artifacts_archive"] = str(self.artifacts)

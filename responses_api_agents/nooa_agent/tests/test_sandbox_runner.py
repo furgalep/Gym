@@ -505,3 +505,56 @@ def test_tracing_config_defaults_save_everything_and_follow_gyms_collector(monke
     off = NOOATracingConfig(atif=False, trace_jsonl=False, artifacts_output=None, otlp_endpoint=None)
     assert off.worker_payload == {} and not off.collects_artifacts
     assert agent_config().tracing.atif is True  # the server config carries the defaults
+
+
+def test_a_concurrent_close_archives_before_the_session_is_released(worker_result, tmp_path):
+    """Close while the activation still waits on provider I/O: the archive is taken inside the shared
+    finalization, before the session directory is removed, and the run's failure is unchanged."""
+    worker_result["text"] = "not json"
+    order: list[str] = []
+
+    class _ClosingSession(_Session):
+        def __init__(self):
+            super().__init__()
+            self.collect = None
+            self.released = asyncio.Event()
+
+        async def execute(self, *, stage_activation, collect, timeout, close_timeout):
+            self.collect = collect
+            self.staged.append(await stage_activation())
+            await self.released.wait()  # the controller task returns only after finalization
+            raise RuntimeError("activation stopped by close")
+
+        async def close(self, *, timeout):
+            # SandboxSession._finalize: capture once after the harness stopped, then release.
+            try:
+                self.artifacts = await self.collect()
+            except Exception:
+                pass
+            order.append("released")
+            self.closed = True
+            self.released.set()
+
+    class _OrderedSandbox(_ArchivingSandbox):
+        async def exec(self, command, *, cwd=None, timeout_s=None):
+            if "tarfile" in command:
+                order.append("archive")
+            return await super().exec(command, cwd=cwd, timeout_s=timeout_s)
+
+    session = _ClosingSession()
+    runner = _tracing_runner(session, tmp_path)
+    runner.sandbox = _OrderedSandbox()
+
+    async def scenario():
+        run = asyncio.create_task(runner.run(_request()))
+        while not session.staged:
+            await asyncio.sleep(0)
+        await runner.close()
+        with pytest.raises(RuntimeError, match="stopped by close"):
+            await run
+
+    asyncio.run(scenario())
+    assert order == ["archive", "released"]
+    assert runner.artifacts == tmp_path / "out" / "r-0.tar.gz" and runner.artifacts.read_bytes() == b"tgz"
+    assert runner.failure.startswith("RuntimeError")
+    assert "artifacts_capture_failed" not in [g.code for g in runner.observations.gaps]
