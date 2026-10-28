@@ -57,6 +57,7 @@ class _Session:
     closed: bool = False
     log: str = "Traceback: ModuleNotFoundError: nooa_atom"
     staged: list = field(default_factory=list)
+    budgets: list = field(default_factory=list)
 
     @property
     def cleanup(self):
@@ -66,6 +67,7 @@ class _Session:
         return self.log
 
     async def execute(self, *, stage_activation, collect, timeout, close_timeout):
+        self.budgets.append(timeout)
         self.staged.append(await stage_activation())
         return await collect()
 
@@ -351,7 +353,7 @@ class _ArchivingSandbox(_Sandbox):
 
     async def exec(self, command, *, cwd=None, timeout_s=None):
         self.commands.append(command)
-        code = self.tar_exit if command.startswith("tar ") else 0
+        code = self.tar_exit if "tar -czf" in command else 0
         return type("R", (), {"return_code": code, "stdout": "", "stderr": "disk full", "error_type": None})()
 
     async def download(self, remote, local):
@@ -371,6 +373,26 @@ def _tracing_runner(session: _Session, tmp_path, *, tar_exit: int = 0, trace: di
     return runner
 
 
+@pytest.mark.parametrize(
+    ("metadata", "budget"),
+    [
+        (None, 12000.0),  # no row budget: the configured ceiling
+        ({"agent_timeout_sec": "900"}, 900.0),  # canonical task.toml budget, carried as a string
+        ({"agent_timeout_sec": "40000"}, 12000.0),  # a row budget above the ceiling is capped
+    ],
+)
+def test_the_row_agent_budget_bounds_the_supervised_run(worker_result, metadata, budget):
+    worker_result["text"] = episode().model_dump_json()
+    session = _Session()
+    runner = _runner(session, timeout=12000)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "task"}], metadata=metadata)
+    request = NOOARunRequest(
+        responses_create_params=body, model_url_path="/ng-rollout/r-0/v1/responses", rollout_id="r-0"
+    )
+    asyncio.run(runner.run(request))
+    assert session.budgets == [budget]
+
+
 def test_tracing_flags_reach_the_worker_and_artifacts_are_archived_per_rollout(worker_result, tmp_path):
     worker_result["text"] = episode().model_dump_json()
     runner = _tracing_runner(_Session(), tmp_path)
@@ -380,7 +402,11 @@ def test_tracing_flags_reach_the_worker_and_artifacts_are_archived_per_rollout(w
     assert payload["otlp_endpoint"] == "http://c:4318/v1/traces"
     assert payload["artifacts_dir"] == "/tmp/nemo-gym-nooa/x/artifacts"
     sandbox = runner.sandbox
-    assert sandbox.commands[-1] == "tar -czf /tmp/nemo-gym-nooa/x/artifacts.tar.gz -C /tmp/nemo-gym-nooa/x artifacts"
+    # The archive carries the exports, the Episode file and any worker sidecar beside it (result.json.*).
+    assert sandbox.commands[-1] == (
+        "cd /tmp/nemo-gym-nooa/x && tar -czf /tmp/nemo-gym-nooa/x/artifacts.tar.gz"
+        " artifacts result.json $(ls result.json.* 2>/dev/null)"
+    )
     assert sandbox.downloads == [("/tmp/nemo-gym-nooa/x/artifacts.tar.gz", str(tmp_path / "out" / "r-0.tar.gz"))]
     assert runner.artifacts == tmp_path / "out" / "r-0.tar.gz" and runner.artifacts.read_bytes() == b"tgz"
     assert result.episode.response.metadata["harness_artifacts_archive"] == str(tmp_path / "out" / "r-0.tar.gz")

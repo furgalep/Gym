@@ -171,6 +171,9 @@ class SandboxNOOARunner:
     async def _collect_artifacts(self, rollout_id: str) -> None:
         """Archive NOOA's exports out of the sandbox, one tarball per rollout.
 
+        The archive holds the worker's exports directory, the Episode it wrote (`result.json`) and
+        every sidecar the worker placed beside it (`result.json.*`, such as a benchmark policy
+        receipt), so the retained evidence is the worker's own files, not a projection of them.
         A failure here is logged and recorded as a gap, never a failed episode: the exports are
         evidence beside the rollout, and Gym's model server already holds the training capture.
         """
@@ -179,7 +182,9 @@ class SandboxNOOARunner:
         local = Path(self.artifacts_output) / f"{rollout_id}.tar.gz"
         try:
             result = await self.sandbox.exec(
-                f"tar -czf {quote(remote)} -C {quote(self.directory)} artifacts", cwd="/", timeout_s=120
+                f"cd {quote(self.directory)} && tar -czf {quote(remote)} artifacts result.json $(ls result.json.* 2>/dev/null)",
+                cwd="/",
+                timeout_s=120,
             )
             if result.return_code != 0 or result.error_type:
                 raise RuntimeError(f"tar exited {result.return_code}: {(result.stderr or '')[-500:]}")
