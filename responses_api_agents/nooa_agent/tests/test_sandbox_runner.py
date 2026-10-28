@@ -353,7 +353,7 @@ class _ArchivingSandbox(_Sandbox):
 
     async def exec(self, command, *, cwd=None, timeout_s=None):
         self.commands.append(command)
-        code = self.tar_exit if "tar -czf" in command else 0
+        code = self.tar_exit if "tarfile" in command else 0
         return type("R", (), {"return_code": code, "stdout": "", "stderr": "disk full", "error_type": None})()
 
     async def download(self, remote, local):
@@ -402,15 +402,74 @@ def test_tracing_flags_reach_the_worker_and_artifacts_are_archived_per_rollout(w
     assert payload["otlp_endpoint"] == "http://c:4318/v1/traces"
     assert payload["artifacts_dir"] == "/tmp/nemo-gym-nooa/x/artifacts"
     sandbox = runner.sandbox
-    # The archive carries the exports, the Episode file and any worker sidecar beside it (result.json.*).
-    assert sandbox.commands[-1] == (
-        "cd /tmp/nemo-gym-nooa/x && tar -czf /tmp/nemo-gym-nooa/x/artifacts.tar.gz"
-        " artifacts result.json $(ls result.json.* 2>/dev/null)"
+    # The archive is built by the staged interpreter from the session directory (see the script tests).
+    assert sandbox.commands[-1] == runner_module.archive_command(
+        "/rt/python/bin/python3", "/tmp/nemo-gym-nooa/x", "/tmp/nemo-gym-nooa/x/artifacts.tar.gz"
     )
     assert sandbox.downloads == [("/tmp/nemo-gym-nooa/x/artifacts.tar.gz", str(tmp_path / "out" / "r-0.tar.gz"))]
     assert runner.artifacts == tmp_path / "out" / "r-0.tar.gz" and runner.artifacts.read_bytes() == b"tgz"
     assert result.episode.response.metadata["harness_artifacts_archive"] == str(tmp_path / "out" / "r-0.tar.gz")
     assert runner.observations.gaps == []
+
+
+def _archive(tmp_path, files: dict[str, str]) -> list[str]:
+    """Run the archive command on a real session directory holding ``files``; return the member names."""
+    import subprocess
+    import sys
+    import tarfile
+
+    root = tmp_path / "session"
+    root.mkdir(parents=True)
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    out = tmp_path / "artifacts.tar.gz"
+    subprocess.run(runner_module.archive_command(sys.executable, str(root), str(out)), shell=True, check=True)
+    with tarfile.open(out) as tar:
+        return sorted(tar.getnames())
+
+
+def test_the_archive_takes_whatever_evidence_exists(tmp_path):
+    complete = {
+        "artifacts/atif/root.json": "{}",
+        "result.json": "{}",
+        "result.json.atom-policy.json": "{}",
+        "input.json": "{}",  # the payload is not evidence
+    }
+    assert _archive(tmp_path / "a", complete) == [
+        "artifacts",
+        "artifacts/atif",
+        "artifacts/atif/root.json",
+        "result.json",
+        "result.json.atom-policy.json",
+    ]
+    # A cancelled worker leaves exports and a sidecar but no Episode: still archived, no error.
+    without_result = {"artifacts/traces/t.jsonl": "", "result.json.atom-policy.json": "{}"}
+    assert _archive(tmp_path / "b", without_result) == [
+        "artifacts",
+        "artifacts/traces",
+        "artifacts/traces/t.jsonl",
+        "result.json.atom-policy.json",
+    ]
+    # Names with spaces are plain file names, not shell words.
+    assert _archive(tmp_path / "c", {"result.json.extra sidecar": "{}", "result.json": "{}"}) == [
+        "result.json",
+        "result.json.extra sidecar",
+    ]
+    assert _archive(tmp_path / "d", {}) == []  # nothing left behind: an empty archive, not a failure
+
+
+def test_artifacts_are_collected_when_the_worker_leaves_no_result(worker_result, tmp_path):
+    """A stopped or crashed worker's exports are evidence for the failed row; collection runs before close."""
+    worker_result["text"] = "not json"
+    runner = _tracing_runner(_Session(), tmp_path)
+    with pytest.raises(RuntimeError, match="exited without a result"):
+        asyncio.run(runner.run(_request()))
+    assert runner.failure.startswith("RuntimeError")
+    assert runner.artifacts == tmp_path / "out" / "r-0.tar.gz" and runner.artifacts.read_bytes() == b"tgz"
+    assert runner.sandbox.downloads == [
+        ("/tmp/nemo-gym-nooa/x/artifacts.tar.gz", str(tmp_path / "out" / "r-0.tar.gz"))
+    ]
 
 
 def test_a_failed_artifact_collection_is_a_gap_not_a_failed_episode(worker_result, tmp_path):

@@ -33,6 +33,24 @@ from responses_api_agents.nooa_agent.worker import (
 
 LOGGER = logging.getLogger(__name__)
 
+# Archives the worker's evidence out of its session directory: the exports directory, the Episode
+# file and every sidecar beside it (result.json.*). Runs on the staged interpreter so it behaves the
+# same on glibc and musl images, takes whatever exists (a stopped or cancelled worker leaves no
+# result.json), handles any file name, and stores symlinks as links rather than following them.
+ARCHIVE_SCRIPT = """\
+import os, sys, tarfile
+root, out = sys.argv[1], sys.argv[2]
+with tarfile.open(out, "w:gz") as tar:
+    for name in sorted(os.listdir(root)):
+        if name in ("artifacts", "result.json") or name.startswith("result.json."):
+            tar.add(os.path.join(root, name), arcname=name)
+"""
+
+
+def archive_command(python: str, directory: str, archive: str) -> str:
+    """Shell command that archives the evidence in ``directory`` into ``archive`` with ``python``."""
+    return f"{quote(python)} -I -c {quote(ARCHIVE_SCRIPT)} {quote(directory)} {quote(archive)}"
+
 
 class SandboxNOOARunner:
     """Stage the worker's payload, let the shared session supervise the process, read the episode back."""
@@ -151,12 +169,15 @@ class SandboxNOOARunner:
         except Exception as error:
             self.failure = f"{type(error).__name__}: {error}"
             raise
+        finally:
+            # On every path, before the session is closed: a stopped or failed worker's exports and
+            # sidecars are evidence for that row even when it left no gradable Episode.
+            if self.collects_artifacts:
+                await self._collect_artifacts(request.rollout_id)
         self.episode = episode
         request.resource_cookies.update(episode.resource_cookies)
-        if self.collects_artifacts:
-            await self._collect_artifacts(request.rollout_id)
-            if self.artifacts is not None:
-                episode.runtime["artifacts_archive"] = str(self.artifacts)
+        if self.artifacts is not None:
+            episode.runtime["artifacts_archive"] = str(self.artifacts)
         return self.run_result(episode, body, request.rollout_id, request.model_cookies, request.resource_cookies)
 
     @property
@@ -171,20 +192,19 @@ class SandboxNOOARunner:
     async def _collect_artifacts(self, rollout_id: str) -> None:
         """Archive NOOA's exports out of the sandbox, one tarball per rollout.
 
-        The archive holds the worker's exports directory, the Episode it wrote (`result.json`) and
-        every sidecar the worker placed beside it (`result.json.*`, such as a benchmark policy
-        receipt), so the retained evidence is the worker's own files, not a projection of them.
-        A failure here is logged and recorded as a gap, never a failed episode: the exports are
-        evidence beside the rollout, and Gym's model server already holds the training capture.
+        The archive holds whatever of the worker's evidence exists: its exports directory, the
+        Episode it wrote (`result.json`) and every sidecar beside it (`result.json.*`, such as a
+        benchmark policy receipt), so the retained evidence is the worker's own files, not a
+        projection of them. A failure here is logged and recorded as a gap, never a failed episode:
+        the exports are evidence beside the rollout, and Gym's model server already holds the
+        training capture.
         """
         assert self.artifacts_output is not None
         remote = f"{self.directory}/artifacts.tar.gz"
         local = Path(self.artifacts_output) / f"{rollout_id}.tar.gz"
         try:
             result = await self.sandbox.exec(
-                f"cd {quote(self.directory)} && tar -czf {quote(remote)} artifacts result.json $(ls result.json.* 2>/dev/null)",
-                cwd="/",
-                timeout_s=120,
+                archive_command(self.python, self.directory, remote), cwd="/", timeout_s=120
             )
             if result.return_code != 0 or result.error_type:
                 raise RuntimeError(f"tar exited {result.return_code}: {(result.stderr or '')[-500:]}")
