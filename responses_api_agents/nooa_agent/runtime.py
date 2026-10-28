@@ -72,8 +72,39 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def build_runtime(output: Path, *, target: str, requirements: list[str], cache: Path | None = None) -> Path:
-    """Produce ``output``: ``python/`` with NOOA and its dependencies installed, for ``target``."""
+def source_requirement(requirement: str) -> tuple[Path, str] | None:
+    """``(directory, extras)`` for a local source directory spec such as ``packages/nooa-atom[benchmark]``.
+
+    ``None`` when the spec is not a local directory. Extras are kept verbatim (``"[benchmark]"`` or
+    ``""``) and re-applied to the wheel built from the directory, since installing a wheel by path
+    never activates an extra on its own.
+    """
+    path, extras = requirement, ""
+    if requirement.endswith("]") and "[" in requirement:
+        path, _, rest = requirement.rpartition("[")
+        extras = f"[{rest}"
+    return (Path(path), extras) if Path(path).is_dir() else None
+
+
+def _wheel_spec(wheel: Path, extras: str) -> str:
+    """PEP 508 spec installing ``wheel`` with ``extras``: ``name[extras] @ file:///…whl``."""
+    name = wheel.name.split("-", 1)[0]
+    return f"{name}{extras} @ {wheel.resolve().as_uri()}" if extras else str(wheel)
+
+
+def build_runtime(
+    output: Path,
+    *,
+    target: str,
+    requirements: list[str],
+    cache: Path | None = None,
+    check_imports: tuple[str, ...] = (),
+) -> Path:
+    """Produce ``output``: ``python/`` with NOOA and its dependencies installed, for ``target``.
+
+    ``check_imports`` names modules the build must import (natively) or ship as top-level package
+    directories (cross-build), beyond HEALTH_CHECK: a staging gate, not proof the capability works.
+    """
     if target not in PYTHON_SHA256:
         raise ValueError(f"unsupported target {target!r}; expected one of {sorted(PYTHON_SHA256)}")
     cache = cache or Path(tempfile.gettempdir()) / "nemo-gym-nooa-runtime-assets"
@@ -97,12 +128,15 @@ def build_runtime(output: Path, *, target: str, requirements: list[str], cache: 
         wheels = build / "wheels"
         wheels.mkdir()
         specs: list[str] = []
-        for requirement in requirements:
-            if Path(requirement).is_dir():
-                subprocess.run([uv, "build", "--quiet", "--wheel", "--out-dir", str(wheels), requirement], check=True)
-            else:
+        for index, requirement in enumerate(requirements):
+            source = source_requirement(requirement)
+            if source is None:
                 specs.append(requirement)
-        specs.extend(str(wheel) for wheel in sorted(wheels.glob("*.whl")))
+                continue
+            directory, extras = source
+            out = wheels / str(index)  # one directory per source, so the wheel keeps its extras
+            subprocess.run([uv, "build", "--quiet", "--wheel", "--out-dir", str(out), str(directory)], check=True)
+            specs.extend(_wheel_spec(wheel, extras) for wheel in sorted(out.glob("*.whl")))
         # Install into the interpreter's own site-packages: no venv, nothing to relocate but the tree.
         native = host_target() == target
         config = ["--config-file", str(UV_CONFIG)]
@@ -142,11 +176,13 @@ def build_runtime(output: Path, *, target: str, requirements: list[str], cache: 
         for marker in (build / "python").rglob("_editable_impl_*.pth"):
             raise RuntimeError(f"editable install leaked into the runtime: {marker.name}")
         if native:
-            subprocess.run([str(python), "-I", "-c", HEALTH_CHECK], check=True)
+            check = "; ".join([HEALTH_CHECK, *(f"import {module}" for module in check_imports)])
+            subprocess.run([str(python), "-I", "-c", check], check=True)
         else:
             # Can't execute the target interpreter here; the sandbox-side import check in
             # stage_runtime() is the health check for cross-built tarballs.
-            for package in ("nooa", "nooa_bench", "litellm", "httpx", "mcp", "cryptography", "cffi"):
+            packages = ("nooa", "nooa_bench", "litellm", "httpx", "mcp", "cryptography", "cffi")
+            for package in (*packages, *(module.split(".", 1)[0] for module in check_imports)):
                 if not (site / package).is_dir():
                     raise RuntimeError(f"cross-build is missing package directory {package!r}")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -235,10 +271,23 @@ def main() -> None:
     group = build.add_mutually_exclusive_group(required=True)
     group.add_argument("--target", choices=sorted(PYTHON_SHA256), help="python-build-standalone target triple")
     group.add_argument("--arch", choices=["x86_64", "aarch64"], help="shorthand for the glibc target of this machine")
-    build.add_argument("requirements", nargs="+", help="pip requirement specs or local source directories")
+    build.add_argument(
+        "--check-import",
+        action="append",
+        default=[],
+        metavar="MODULE",
+        help="additional module the built runtime must provide (repeatable)",
+    )
+    build.add_argument(
+        "requirements",
+        nargs="+",
+        help="pip requirement specs or local source directories, optionally with extras (packages/nooa-atom[benchmark])",
+    )
     args = parser.parse_args()
     target = args.target or f"{args.arch}-unknown-linux-gnu"
-    path = build_runtime(args.output, target=target, requirements=args.requirements)
+    path = build_runtime(
+        args.output, target=target, requirements=args.requirements, check_imports=tuple(args.check_import)
+    )
     print(f"{path} sha256={file_sha256(path)}")
 
 

@@ -145,3 +145,18 @@ def test_build_targets_are_pinned():
     assert runtime.python_url("x86_64-unknown-linux-musl").endswith(
         "x86_64-unknown-linux-musl-install_only_stripped.tar.gz"
     )
+
+
+def test_source_requirements_keep_their_extras_for_the_built_wheel(tmp_path):
+    """A local directory with an extra is built to a wheel and installed as name[extra] @ file:// so the
+    extra's dependencies are resolved; installing the wheel by path alone would never activate it."""
+    from responses_api_agents.nooa_agent.runtime import _wheel_spec, source_requirement
+
+    (tmp_path / "nooa-atom").mkdir()
+    assert source_requirement(f"{tmp_path}/nooa-atom[benchmark]") == (tmp_path / "nooa-atom", "[benchmark]")
+    assert source_requirement(f"{tmp_path}/nooa-atom") == (tmp_path / "nooa-atom", "")
+    assert source_requirement("nooa-atom[benchmark]==1.0") is None  # a pip spec, not a directory
+    assert source_requirement("jsonschema>=4") is None
+    wheel = tmp_path / "nooa_atom-0.0.11-py3-none-any.whl"
+    assert _wheel_spec(wheel, "[benchmark]") == f"nooa_atom[benchmark] @ {wheel.as_uri()}"
+    assert _wheel_spec(wheel, "") == str(wheel)
