@@ -68,9 +68,9 @@ async def test_atom_runs_through_the_runner_with_a_scripted_model(tmp_path: Path
     )
     code = (
         "open('hello.txt', 'w').write('hello gym')\n"
-        "return_result(Done(explanation='wrote the file', result=TaskResult("
+        "return Done(explanation='wrote the file', result=TaskResult("
         "solution_description='created hello.txt', evidence='file exists', how_to_verify='cat hello.txt', "
-        "report='done')))"
+        "report='done'))"
     )
     calls: list[dict] = []
 
@@ -108,7 +108,7 @@ async def test_atom_runs_through_the_runner_with_a_scripted_model(tmp_path: Path
     response, observations = finalize_run_result(result)
     assert response.status == "completed"
     # Two gaps the current projection records for Atom: the scripted model carries no training
-    # metadata, and Atom always ends with return_result() rather than a model-authored message, so
+    # metadata, and Atom always ends with a returned value rather than a model-authored message, so
     # the projection appends a synthetic one and flags the terminal output as non-trainable. The
     # second gap is the RL blocker: token-id capture cannot attribute the scored response to a
     # captured call through that synthetic message (declared terminal_response_id is the fix).
@@ -153,10 +153,10 @@ async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, mo
     config = atom_config()
     code = [
         "child = await self.delegate('offline child', 'return child evidence')\n"
-        "return_result(Done(explanation='root', result=TaskResult(solution_description='root', "
-        "evidence=child.result.evidence, how_to_verify='offline', report='native root and child')))",
-        "return_result(Done(explanation='child', result=TaskResult(solution_description='child', "
-        "evidence='native child evidence', how_to_verify='offline', report='child')))",
+        "return Done(explanation='root', result=TaskResult(solution_description='root', "
+        "evidence=child.result.evidence, how_to_verify='offline', report='native root and child'))",
+        "return Done(explanation='child', result=TaskResult(solution_description='child', "
+        "evidence='native child evidence', how_to_verify='offline', report='child'))",
     ]
     calls: list[dict] = []
 
