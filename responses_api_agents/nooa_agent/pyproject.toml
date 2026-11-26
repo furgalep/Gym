@@ -8,10 +8,10 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
     "jsonschema>=4.25.1,<5",
-    "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@783af583e1865e1ed550a4978aa3b856d4c6d698",
-    "nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/783af583e1865e1ed550a4978aa3b856d4c6d698.tar.gz#subdirectory=packages/nooa-cli",
-    "nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/783af583e1865e1ed550a4978aa3b856d4c6d698.tar.gz#subdirectory=packages/nooa-bench",
-    "nooa-atom @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/783af583e1865e1ed550a4978aa3b856d4c6d698.tar.gz#subdirectory=packages/nooa-atom",
+    "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@4fe2cd947dd44461e0d0b67bb294cc1e33618f77",
+    "nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/4fe2cd947dd44461e0d0b67bb294cc1e33618f77.tar.gz#subdirectory=packages/nooa-cli",
+    "nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/4fe2cd947dd44461e0d0b67bb294cc1e33618f77.tar.gz#subdirectory=packages/nooa-bench",
+    "nooa-atom @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/4fe2cd947dd44461e0d0b67bb294cc1e33618f77.tar.gz#subdirectory=packages/nooa-atom",
 ]
 
 [tool.uv]
