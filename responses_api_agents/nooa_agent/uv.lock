@@ -1363,10 +1363,10 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.25.1,<5" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "nooa", git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=41cc95064326ebf9a28ff05656f6cdf367a3ced0" },
-    { name = "nooa-atom", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/41cc95064326ebf9a28ff05656f6cdf367a3ced0.tar.gz", subdirectory = "packages/nooa-atom" },
-    { name = "nooa-bench", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/41cc95064326ebf9a28ff05656f6cdf367a3ced0.tar.gz", subdirectory = "packages/nooa-bench" },
-    { name = "nooa-cli", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/41cc95064326ebf9a28ff05656f6cdf367a3ced0.tar.gz", subdirectory = "packages/nooa-cli" },
+    { name = "nooa", git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=dcf3b1c1d" },
+    { name = "nooa-atom", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/dcf3b1c1d.tar.gz", subdirectory = "packages/nooa-atom" },
+    { name = "nooa-bench", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/dcf3b1c1d.tar.gz", subdirectory = "packages/nooa-bench" },
+    { name = "nooa-cli", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/dcf3b1c1d.tar.gz", subdirectory = "packages/nooa-cli" },
 ]
 provides-extras = ["telemetry"]
 
@@ -2473,8 +2473,8 @@ wheels = [
 
 [[package]]
 name = "nooa"
-version = "0.0.13.dev304"
-source = { git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=41cc95064326ebf9a28ff05656f6cdf367a3ced0#41cc95064326ebf9a28ff05656f6cdf367a3ced0" }
+version = "0.0.13.dev306"
+source = { git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=dcf3b1c1d#dcf3b1c1d0c1e694f89a0fcb8e6d2a5b369bad7d" }
 dependencies = [
     { name = "anyio" },
     { name = "filelock", marker = "sys_platform == 'win32'" },
@@ -2496,7 +2496,7 @@ mcp = [
 [[package]]
 name = "nooa-atom"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/41cc95064326ebf9a28ff05656f6cdf367a3ced0.tar.gz", subdirectory = "packages/nooa-atom" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/dcf3b1c1d.tar.gz", subdirectory = "packages/nooa-atom" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "click" },
@@ -2507,7 +2507,7 @@ dependencies = [
     { name = "ripgrep-bin" },
     { name = "websockets" },
 ]
-sdist = { hash = "sha256:4e244d49b6b1ebcddff3c50bbf1d1995011720635a7757ee4680e718160474ab" }
+sdist = { hash = "sha256:c8d584972d49e9d9945e3d9e1cc549bc3b56ad2edd56578f962bf8f7c8476814" }
 
 [package.metadata]
 requires-dist = [
@@ -2557,13 +2557,13 @@ provides-extras = ["ast", "benchmark"]
 [[package]]
 name = "nooa-bench"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/41cc95064326ebf9a28ff05656f6cdf367a3ced0.tar.gz", subdirectory = "packages/nooa-bench" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/dcf3b1c1d.tar.gz", subdirectory = "packages/nooa-bench" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "nooa-cli" },
 ]
-sdist = { hash = "sha256:4e244d49b6b1ebcddff3c50bbf1d1995011720635a7757ee4680e718160474ab" }
+sdist = { hash = "sha256:c8d584972d49e9d9945e3d9e1cc549bc3b56ad2edd56578f962bf8f7c8476814" }
 
 [package.metadata]
 requires-dist = [
@@ -2575,14 +2575,14 @@ requires-dist = [
 [[package]]
 name = "nooa-cli"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/41cc95064326ebf9a28ff05656f6cdf367a3ced0.tar.gz", subdirectory = "packages/nooa-cli" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/dcf3b1c1d.tar.gz", subdirectory = "packages/nooa-cli" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "prompt-toolkit" },
     { name = "pyyaml" },
 ]
-sdist = { hash = "sha256:4e244d49b6b1ebcddff3c50bbf1d1995011720635a7757ee4680e718160474ab" }
+sdist = { hash = "sha256:c8d584972d49e9d9945e3d9e1cc549bc3b56ad2edd56578f962bf8f7c8476814" }
 
 [package.optional-dependencies]
 ast = [
